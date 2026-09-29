@@ -20,6 +20,7 @@ mod fmt;
 mod html;
 mod images;
 mod math;
+mod search;
 mod nav;
 mod notebooks;
 mod palette;

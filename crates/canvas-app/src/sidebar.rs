@@ -222,7 +222,7 @@ fn count_badge(ui: &Ui, rect: Rect, n: i64, bg: Color32) {
     let g = lay(ui, &n.to_string(), ts, None, false);
     let r = Rect::from_min_size(pos2(rect.max.x - 8.0 - g.size().x - 12.0, rect.center().y - 8.5), vec2(g.size().x + 12.0, 17.0));
     ui.painter().rect_filled(r, cr(9.0), bg);
-    ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
+    crate::widgets::centered_caps(ui, r, &n.to_string(), ts);
 }
 
 pub fn draw(app: &mut App, ui: &mut Ui, rect: Rect) {

@@ -124,6 +124,17 @@ impl Services {
         engine.set_ext(Arc::new(Ext { recordings: Arc::downgrade(&recordings), notebooks: Arc::downgrade(&notebooks) }));
         let warm = engine.clone();
         engine.add_after_sync(Arc::new(move || warm_files(warm.clone()).boxed()));
+        // search: fetch what isn't cached yet (page bodies, transcripts), then index it all
+        let (fe, fr) = (engine.clone(), recordings.clone());
+        engine.add_after_sync(Arc::new(move || {
+            let (e, r) = (fe.clone(), fr.clone());
+            async move {
+                crate::fulltext::warm(e.clone(), r).await;
+                let n = tokio::task::spawn_blocking(move || crate::fulltext::refresh(&e)).await.unwrap_or(0);
+                log::info!("search index: {n} documents updated");
+            }
+            .boxed()
+        }));
         let anki = Anki::new(engine.clone());
         Ok(Arc::new(Services { engine, recordings, anki, notebooks, watcher: Watcher::default(), openers: Mutex::new(HashMap::new()) }))
     }
@@ -190,6 +201,65 @@ impl Services {
             out.push(json!({"t": subject, "k": "message", "c": s(&m["context_name"]), "h": format!("#/inbox/{}", m["id"])}));
         }
         out
+    }
+
+    // --- full-text search -------------------------------------------------------------------------
+    /// Sections of cached documents, transcripts and PDFs matching a query (fulltext::search).
+    pub async fn search_content(&self, q: &str, limit: usize) -> Vec<Value> {
+        let (e, q) = (self.engine.clone(), q.to_string());
+        tokio::task::spawn_blocking(move || crate::fulltext::search(&e, &q, limit)).await.unwrap_or_default()
+    }
+
+    /// Bring the search index up to date with the cache now.
+    pub async fn refresh_search(&self) {
+        let e = self.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::fulltext::refresh(&e)).await;
+    }
+
+    /// A recording's transcript {title, text}: saved after the first fetch (captions don't change).
+    pub async fn transcript(&self, cid: &str, rid: &str) -> ApiResult {
+        let key = format!("transcript:{cid}:{rid}");
+        if let Some((v, _)) = self.engine.store.get(&key) {
+            if let Ok(v) = serde_json::from_str(&v) {
+                return Ok(v);
+            }
+        }
+        let label = self.engine.cached_list("courses", &[]).into_iter().chain(self.engine.cached_list("past_courses", &[])).find(|c| c["id"].to_string() == cid).map(|c| s(&c["course_code"])).unwrap_or_default();
+        let (title, text) = self.recordings.transcript(rid, &label).await.map_err(|e| err(&e))?;
+        let v = json!({"title": title, "text": text});
+        self.engine.store.put(&key, &v.to_string());
+        let e = self.engine.clone();
+        tokio::task::spawn_blocking(move || crate::fulltext::refresh(&e));
+        Ok(v)
+    }
+
+    /// Downloaded PDFs whose text isn't in the search index yet: {fid, cid, name, course, path, tag}.
+    pub fn pdfs_to_index(&self) -> Vec<Value> {
+        let e = &self.engine;
+        let mut out = Vec::new();
+        for c in e.cached_list("courses", &[]).into_iter().chain(e.cached_list("past_courses", &[])) {
+            let cid = c["id"].to_string();
+            let course = c["course_code"].as_str().filter(|x| !x.is_empty()).map(String::from).unwrap_or_else(|| s(&c["name"]));
+            let Some(files) = e.cached("files", &[cid.clone()]) else { continue };
+            for f in files["files"].as_array().into_iter().flatten() {
+                if f["content-type"] != "application/pdf" {
+                    continue;
+                }
+                let fid = f["id"].to_string();
+                let path = crate::files::blob_path(&fid, f);
+                let tag = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if path.exists() && !crate::fulltext::has(e, &format!("pdf:{fid}"), &tag) {
+                    out.push(json!({"fid": fid, "cid": cid, "name": s(&f["display_name"]), "course": course, "path": path.to_string_lossy(), "tag": tag}));
+                }
+            }
+        }
+        out
+    }
+
+    /// Put a PDF's page texts (extracted by the app) in the search index.
+    pub fn index_pdf(&self, item: &Value, pages: Vec<String>) {
+        let (fid, cid) = (s(&item["fid"]), s(&item["cid"]));
+        crate::fulltext::put_pdf(&self.engine, &fid, &s(&item["tag"]), &s(&item["name"]), &s(&item["course"]), &format!("#/c/{cid}/f/{fid}"), pages);
     }
 
     // --- files and images ------------------------------------------------------------------------

@@ -127,6 +127,7 @@ pub struct App {
     pub anki: crate::anki::AnkiState,
     pub cp: crate::checkpoints::Cp,
     pub pdf: crate::pdf::Pdfs,
+    pub search: crate::search::Search,
     pub images: crate::images::Images,
     pub vines: crate::vines::Vines,
     pub debug: crate::debug::Debug,
@@ -206,6 +207,7 @@ impl App {
             anki: crate::anki::AnkiState::default(),
             cp: crate::checkpoints::Cp::load(&prefs),
             pdf: crate::pdf::Pdfs::new(),
+            search: crate::search::Search::default(),
             images: crate::images::Images::default(),
             vines: crate::vines::Vines::load(&prefs),
             debug: crate::debug::Debug::load(&prefs),
@@ -321,6 +323,7 @@ impl App {
         self.process();
         crate::checkpoints::tick(self);
         crate::anki::tick(self);
+        crate::search::tick(self);
         // The theme: the system's changes, then this frame's tokens (mid-fade, maybe).
         let sys_dark = crate::system_dark(ctx);
         self.theme.set_system_dark(sys_dark);

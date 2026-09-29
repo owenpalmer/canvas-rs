@@ -277,32 +277,36 @@ pub fn file(app: &mut App, ui: &mut Ui, pane: Pane, cid: Option<&str>, fid: &str
         let o = super::out(app, pane);
         o.title = name.clone();
         o.crumbs = crumbs;
-        ui.add_space(-4.0);
+        // one compact row: the name (cut to fit), its size, Checkpoints and Open in Canvas
+        ui.add_space(-6.0);
         let cp_on = app.cp.mode;
-        w::hwrap(ui, vec2(10.0, 8.0), |ui| {
-            let avail = ui.available_width();
-            let btn_w = 4.0 * 12.0 + 240.0 + if label.len() > 4 { label.len() as f32 * 6.5 } else { 30.0 };
-            let size = fmt::fmt_size(&meta["size"]);
-            let size_w = w::lay(ui, &size, Ts::faint(12.0), None, false).size().x;
-            let title_w = (avail - btn_w - size_w - 20.0).max(160.0);
-            let g = w::lay(ui, &name, Ts::new(15.0, 650, tk.text).sp(-0.01), Some(title_w), true);
-            let (r, resp) = ui.allocate_exact_size(vec2(title_w.min(g.size().x.max(40.0)), 26.0), Sense::hover());
-            ui.painter().galley(pos2(r.min.x, r.center().y - g.size().y / 2.0), g, tk.text);
-            resp.on_hover_text(&name);
-            w::text_line_fixed(ui, &size, Ts::faint(12.0));
-            {
-                let small = ButtonOpts { size: 12.0, pad: vec2(9.0, 3.0), pressed: cp_on, ..Default::default() };
-                if w::button_ex(ui, "Checkpoints", small).on_hover_text("Checkpoint mode (M)").clicked() {
-                    crate::checkpoints::set_mode(app, !cp_on);
-                }
-                open_button(app, ui, fid, &label, true);
-                if w::button_ex(ui, "Open in Canvas ↗", ButtonOpts { size: 12.0, pad: vec2(9.0, 3.0), ..Default::default() }).clicked() {
-                    app.open_external(&canvas_url);
-                }
-            }
-        });
-        ui.add_space(10.0);
-        crate::checkpoints::hint_line(app, ui);
+        let small = |pressed| ButtonOpts { size: 12.0, pad: vec2(8.0, 2.0), pressed, ..Default::default() };
+        let size = fmt::fmt_size(&meta["size"]);
+        let avail = ui.available_width();
+        let btn_w = ["Checkpoints", "Canvas ↗"].iter().map(|l| w::lay(ui, l, Ts::new(12.0, 400, tk.text), None, false).size().x + 18.0).sum::<f32>() + 6.0;
+        let size_w = w::lay(ui, &size, Ts::faint(12.0), None, false).size().x;
+        let title_w = (avail - btn_w - size_w - 20.0).max(60.0);
+        let (row, _) = ui.allocate_exact_size(vec2(avail, 24.0), Sense::hover());
+        let g = w::lay(ui, &name, Ts::new(14.0, 650, tk.text).sp(-0.01), Some(title_w), true);
+        let g_elided = g.size().x + 1.0 < w::lay(ui, &name, Ts::new(14.0, 650, tk.text).sp(-0.01), None, false).size().x;
+        let gw = g.size().x;
+        let title_rect = Rect::from_min_size(pos2(row.min.x, row.center().y - g.size().y / 2.0), g.size());
+        ui.painter().galley(title_rect.min, g, tk.text);
+        ui.interact(title_rect, egui::Id::new(("pdf-title", fid)), Sense::hover()).on_hover_text(&name);
+        // the size, when the whole name fits
+        if !g_elided {
+            let sg = w::lay(ui, &size, Ts::faint(12.0), None, false);
+            ui.painter().galley(pos2(row.min.x + gw + 8.0, row.center().y - sg.size().y / 2.0), sg, tk.faint);
+        }
+        let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        bar.spacing_mut().item_spacing.x = 6.0;
+        if w::button_ex(&mut bar, "Canvas ↗", small(false)).on_hover_text("Open in Canvas").clicked() {
+            app.open_external(&canvas_url);
+        }
+        if w::button_ex(&mut bar, "Checkpoints", small(cp_on)).on_hover_text("Checkpoint mode (M)").clicked() {
+            crate::checkpoints::set_mode(app, !cp_on);
+        }
+        ui.add_space(8.0);
         crate::pdf::view(app, ui, pane, fid, &name, cid);
         return Ok(());
     }

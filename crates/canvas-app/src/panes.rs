@@ -495,6 +495,9 @@ fn scroll_body(app: &mut App, ui: &mut Ui, pane: Pane, id: &str, add: impl FnOnc
     st.scroll = out.state.offset.y;
     st.viewport_h = out.inner_rect.height();
     st.content_top = out.inner;
+    let (top, view_h) = (out.inner, out.inner_rect.height());
+    crate::search::resolve(app, pane, top, view_h);
+    let st = state(app, pane);
     if let Some(r) = st.scroll_to_rect.take() {
         // scrollIntoView({block: "nearest"})
         let view = out.inner_rect;
@@ -569,16 +572,19 @@ pub fn draw_viewer(app: &mut App, ui: &mut Ui, rect: Rect) {
     // .viewer-head: padding 8px 10px 0 8px, border-bottom 1px line
     let head_h = 8.0 + 30.0;
     let head = Rect::from_min_size(rect.min, vec2(rect.width(), head_h));
-    let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(head.min + vec2(8.0, 8.0), head.max - vec2(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Max)));
-    hui.allocate_ui_with_layout(vec2(0.0, 29.0), egui::Layout::left_to_right(egui::Align::Center), |ui| pane_buttons(app, ui, Pane::Viewer));
-    hui.add_space(4.0);
-    tabs_strip(app, &mut hui);
-    ui.painter().hline(rect.x_range(), head.max.y - 0.5, Stroke::new(1.0, tk.line));
+    // the pane buttons sit 5px above the border; the tabs stand on it
+    let btns = Rect::from_min_max(pos2(head.min.x + 8.0, head.max.y - 5.0 - 24.0), pos2(head.max.x - 10.0, head.max.y - 5.0));
+    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(btns).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("viewer-btns"));
+    pane_buttons(app, &mut bui, Pane::Viewer);
+    let tabs_x = bui.min_rect().max.x + 4.0;
+    let strip = Rect::from_min_max(pos2(tabs_x, head.max.y - 30.0), pos2(head.max.x - 10.0, head.max.y));
+    tabs_strip(app, ui, strip);
     // #viewer-body: padding 14px 24px 60px
     let body = Rect::from_min_max(pos2(rect.min.x, head.max.y), rect.max);
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("viewer-body"));
     bui.set_clip_rect(body);
     if app.panes.active_tab().is_none() {
+        ui.painter().hline(rect.x_range(), head.max.y - 0.5, Stroke::new(1.0, tk.line));
         return;
     }
     // Switching tabs puts back where you were in that tab.
@@ -596,21 +602,21 @@ pub fn draw_viewer(app: &mut App, ui: &mut Ui, rect: Rect) {
         let used = vui.min_rect();
         ui.allocate_space(vec2(w, (used.max.y - ui.cursor().min.y).max(0.0) + 60.0));
     });
+    // the header's border, over whatever scrolled under it
+    ui.painter().hline(rect.x_range(), head.max.y - 0.5, Stroke::new(1.0, tk.line));
     // A tab gets its title when drawn; a pinned one waiting in the background looks it up.
     crate::views::fill_titles(app);
 }
 
 /// The tab strip: click to switch, middle-click or × to close, double-click to keep a preview.
-fn tabs_strip(app: &mut App, ui: &mut Ui) {
+fn tabs_strip(app: &mut App, ui: &mut Ui, strip: Rect) {
     let tk = t();
-    let avail = ui.available_rect_before_wrap();
-    let strip = Rect::from_min_max(pos2(avail.min.x, avail.max.y - 30.0), avail.max);
-    let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Max)));
+    let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Min)).id_salt("viewer-tabs"));
     sui.set_clip_rect(strip.intersect(ui.clip_rect()));
     let mut act: Option<(u64, &str)> = None;
     egui::ScrollArea::horizontal().id_salt("vtabs").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(&mut sui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
             let ids: Vec<(u64, String, bool, bool)> = app.panes.tabs.iter().map(|t| (t.id, t.title.clone(), t.pinned, Some(t.id) == app.panes.active)).collect();
             for (id, title, pinned, on) in ids {
                 let title = if title.is_empty() { "Loading…".to_string() } else { title };
@@ -645,8 +651,13 @@ fn tabs_strip(app: &mut App, ui: &mut Ui) {
                 } else if resp.clicked() {
                     act = Some((id, "activate"));
                 }
-                if on && app.panes.preview_at.as_ref().map(|(h, _)| h == "scroll-tab").unwrap_or(false) {
-                    ui.scroll_to_rect(rect, None);
+                // a tab that just became active scrolls into view
+                if on {
+                    let last = Id::new("vtabs-shown");
+                    if ui.data(|d| d.get_temp::<u64>(last)) != Some(id) {
+                        ui.data_mut(|d| d.insert_temp(last, id));
+                        ui.scroll_to_rect(rect, None);
+                    }
                 }
             }
         });

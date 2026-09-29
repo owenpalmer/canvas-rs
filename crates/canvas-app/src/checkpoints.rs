@@ -1610,36 +1610,6 @@ pub fn set_view(app: &mut App, view: Rect, origin: f32) {
     app.cp.origin = origin;
 }
 
-// ---------- the hint under the PDF's bar ----------
-pub fn hint_line(app: &mut App, ui: &mut Ui) {
-    if !app.cp.mode {
-        return;
-    }
-    let tk = t();
-    ui.add_space(-4.0);
-    let parts: Vec<(&str, bool)> = if app.cp.adding {
-        vec![("Click where the passage ends · ", false), ("Esc", true), (" stops", false)]
-    } else {
-        vec![("J", true), ("K", true), (" sentence by sentence · ", false), ("C", true), (" checkpoint after it · ", false), ("A", true), (" click to place one · ", false), ("M", true), (" done", false)]
-    };
-    let ts = if app.cp.adding { Ts::new(12.0, 550, tk.accent) } else { Ts::muted(12.0) };
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
-    let mut x = r.min.x;
-    for (s, k) in parts {
-        if k {
-            let sz = w::kbd_size(ui, s, 10.0);
-            w::paint_kbd(ui, pos2(x, r.center().y - sz.y / 2.0), s, 10.0, None, None, None);
-            x += sz.x + 2.0;
-        } else {
-            let g = w::lay(ui, s, ts, None, false);
-            let gw = g.size().x;
-            ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, ts.color);
-            x += gw;
-        }
-    }
-    ui.add_space(10.0);
-}
-
 // ---------- Settings ----------
 pub fn settings_section(app: &mut App, ui: &mut Ui) {
     let tk = t();

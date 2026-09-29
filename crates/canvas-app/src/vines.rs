@@ -684,6 +684,8 @@ pub struct Layer {
     growing: Vec<usize>,
     prev_active: Option<[i32; 4]>,
     pub done: bool,
+    /// a regrown (not animated) layer fades in from here
+    fade_from: Option<Instant>,
 }
 
 fn to_image(pm: &Pixmap, r: [i32; 4]) -> Option<(ColorImage, [usize; 2])> {
@@ -714,7 +716,7 @@ impl Layer {
         let blank = ColorImage::new([pw as usize, ph as usize], vec![Color32::TRANSPARENT; (pw * ph) as usize]);
         let stems_tex = ctx.load_texture(format!("vines-stems-{key}"), blank.clone(), TextureOptions::LINEAR);
         let leaves_tex = ctx.load_texture(format!("vines-leaves-{key}"), blank, TextureOptions::LINEAR);
-        let mut l = Layer { size, dpr, scene, stems, still, leaves, stems_tex, leaves_tex, start: Instant::now(), animate, si: 0, li: 0, growing: Vec::new(), prev_active: None, done: false };
+        let mut l = Layer { size, dpr, scene, stems, still, leaves, stems_tex, leaves_tex, start: Instant::now(), animate, si: 0, li: 0, growing: Vec::new(), prev_active: None, done: false, fade_from: None };
         if !animate {
             l.finish_now();
         }
@@ -974,6 +976,9 @@ fn grow_layer(app: &mut App, ctx: &egui::Context, key: &str, size: (f32, f32), a
                 match layer {
                     Some(mut l) => {
                         l.start = Instant::now();
+                        if !animate {
+                            l.fade_from = Some(Instant::now());
+                        }
                         app.vines.layers.insert(key, l);
                     }
                     None => {
@@ -984,6 +989,9 @@ fn grow_layer(app: &mut App, ctx: &egui::Context, key: &str, size: (f32, f32), a
         },
     );
 }
+
+/// How long a regrown layer takes to fade in (s).
+const FADE_IN: f32 = 0.6;
 
 /// Paint the vines behind the sidebar and main (called before their content), growing them the
 /// first time (after the launch intro starts) and regrowing when a region changes size.
@@ -1022,7 +1030,8 @@ pub fn paint(app: &mut App, ui: &mut Ui, sidebar: Option<Rect>, main: Option<Rec
             app.vines.seen.insert(key.to_string());
             grow_layer(app, &ctx, key, size, animate);
         } else if have != Some(size) && pending != Some(size) {
-            // regrow (without animating) once the size settles for 200ms
+            // regrow (without animating) once the size settles for 200ms; meanwhile the old
+            // drawing isn't shown (it no longer fits the edges), and the new one fades in
             let entry = app.vines.resize_at.entry(key.to_string()).or_insert((Instant::now(), size));
             if entry.1 != size {
                 *entry = (Instant::now(), size);
@@ -1035,7 +1044,23 @@ pub fn paint(app: &mut App, ui: &mut Ui, sidebar: Option<Rect>, main: Option<Rec
             }
         }
         if let Some(l) = app.vines.layers.get_mut(key) {
+            if l.size != size {
+                continue;
+            }
             l.step();
+            let appear = match l.fade_from {
+                Some(t0) => {
+                    let x = (t0.elapsed().as_secs_f32() / FADE_IN).min(1.0);
+                    if x < 1.0 {
+                        ctx.request_repaint();
+                    } else {
+                        l.fade_from = None;
+                    }
+                    crate::anim::ease_in_out(x)
+                }
+                None => 1.0,
+            };
+            let opacity = opacity * appear;
             if !l.done {
                 ctx.request_repaint();
             }

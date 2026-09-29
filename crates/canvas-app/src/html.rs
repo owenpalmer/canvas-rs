@@ -861,6 +861,10 @@ fn para(app: &mut App, ui: &mut Ui, cx: &mut Ctx, inl: &[Inl], env: &Env, base_w
     cx.n += 1;
     let size = vec2(width, galley.size().y);
     let (rect, resp) = ui.allocate_exact_size(size + vec2(0.0, 0.0), Sense::click());
+    // a search hit being opened: this paragraph may be it, or be highlighted as it
+    if let Some(a) = crate::search::para(app, env.pane, &galley.job.text, rect) {
+        ui.painter().rect_filled(rect.expand2(vec2(6.0, 3.0)), crate::widgets::cr(4.0), crate::theme::alpha(t().accent, 0.22 * a));
+    }
     let origin = rect.min + vec2(0.0, pad * 0.0);
     // text x offset for alignment: galley rect may start left of 0 for centered text
     let gpos = pos2(match align {

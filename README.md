@@ -118,6 +118,12 @@ cache, so pages open instantly and stay readable offline. Keyboard: `Ctrl K` or 
 `g d` dashboard, `g i` inbox, `g a` Anki, `r` refresh, `t` theme, `?` for all shortcuts.
 Appearance settings (including the procedural vines) are under Settings.
 
+**Search** (`Ctrl K` or `/`) finds titles, and also text inside everything cached: pages,
+assignment descriptions, announcements, discussions, the syllabus, messages, PDFs and lecture
+transcripts (from Panopto, when it's set up). Choosing a hit opens it in the viewer, scrolled to
+the passage, which is briefly highlighted. The index lives in `cache.db` and is brought up to date
+after each sync.
+
 **PDFs and checkpoints.** PDFs open in the viewer pane. Press `M` (or *Checkpoints*) in a PDF to add
 checkpoints: `J`/`K` step through the text sentence by sentence, `C` twice splits after the
 highlighted one, and `A` places one with a click. Claude then writes questions about the passage

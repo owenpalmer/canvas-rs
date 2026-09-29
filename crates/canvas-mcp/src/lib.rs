@@ -13,6 +13,7 @@ pub mod demo;
 pub mod engine;
 pub mod error;
 pub mod files;
+pub mod fulltext;
 pub mod markdown;
 pub mod notebooklm;
 pub mod notebooks;

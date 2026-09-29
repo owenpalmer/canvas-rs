@@ -1,7 +1,7 @@
 //! The pages: each gathers what it needs first (so a page that's still loading draws nothing), then
 //! draws. Shared here: dispatch, breadcrumbs, the list row, course sections.
 
-mod canvas;
+pub(crate) mod canvas;
 mod course;
 mod detail;
 
@@ -35,6 +35,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: &Route, pane: Pane) -> Result<(), Nee
         View::Files(c) => course::files(app, ui, pane, c),
         View::File(c, f) => detail::file(app, ui, pane, c.as_deref(), f),
         View::Syllabus(c) => course::syllabus(app, ui, pane, c),
+        View::Recording(c, r) => crate::search::recording_view(app, ui, pane, c, r),
         View::Welcome => crate::setup::welcome(app, ui, pane),
         View::Settings => crate::settings::view(app, ui, pane),
         View::Notebooks => crate::notebooks::list_view(app, ui, pane),

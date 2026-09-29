@@ -16,6 +16,9 @@ pub struct PItem {
     pub c: String,
     pub h: Option<String>,
     pub cmd: Option<usize>,
+    /// a content hit: its snippet (matches between \u{1} and \u{2}) and where it goes
+    pub snippet: Option<String>,
+    pub hit: Option<Value>,
 }
 
 #[derive(Default)]
@@ -121,6 +124,28 @@ pub fn close(app: &mut App) {
     app.palette.open = false;
 }
 
+impl Palette {
+    /// Recompute the results (new content hits arrived).
+    pub fn refresh(&mut self) {
+        self.last_query = None;
+    }
+}
+
+/// A content hit's kind, as the palette shows it.
+fn hit_kind(k: &str) -> &str {
+    match k {
+        "pdf" => "in PDF",
+        "transcript" => "transcript",
+        "page" => "in page",
+        "assignment" => "in assignment",
+        "announcement" => "in announcement",
+        "discussion" => "in discussion",
+        "syllabus" => "in syllabus",
+        "message" => "in message",
+        k => k,
+    }
+}
+
 fn item(v: &Value, k: Option<&str>) -> PItem {
     PItem {
         k: k.map(String::from).unwrap_or_else(|| crate::fmt::s(&v["k"])),
@@ -128,10 +153,14 @@ fn item(v: &Value, k: Option<&str>) -> PItem {
         c: crate::fmt::s(&v["c"]),
         h: v["h"].as_str().map(String::from),
         cmd: None,
+        snippet: None,
+        hit: None,
     }
 }
 
 fn update(app: &mut App) {
+    let raw = app.palette.query.clone();
+    crate::search::want(app, &raw);
     let q = app.palette.query.trim().to_lowercase();
     if app.palette.last_query.as_deref() == Some(q.as_str()) {
         return;
@@ -149,7 +178,7 @@ fn update(app: &mut App) {
                 for c in crate::sidebar::ordered_courses(app, &courses, false) {
                     let h = format!("#/c/{}/modules", crate::fmt::id(&c["id"]));
                     let short = format!("#/c/{}", crate::fmt::id(&c["id"]));
-                    out.push(by_hash.get(&short).or(by_hash.get(&h)).cloned().unwrap_or(PItem { k: "course".into(), t: crate::fmt::s(&c["name"]), c: crate::fmt::s(&c["course_code"]), h: Some(h), cmd: None }));
+                    out.push(by_hash.get(&short).or(by_hash.get(&h)).cloned().unwrap_or(PItem { k: "course".into(), t: crate::fmt::s(&c["name"]), c: crate::fmt::s(&c["course_code"]), h: Some(h), cmd: None, snippet: None, hit: None }));
                 }
             }
             None => out.extend(by_hash.into_values()),
@@ -159,13 +188,26 @@ fn update(app: &mut App) {
         let mut scored: Vec<(f32, PItem)> = COMMANDS
             .iter()
             .enumerate()
-            .map(|(i, (t, c))| PItem { k: "command".into(), t: t.to_string(), c: c.to_string(), h: None, cmd: Some(i) })
+            .map(|(i, (t, c))| PItem { k: "command".into(), t: t.to_string(), c: c.to_string(), h: None, cmd: Some(i), snippet: None, hit: None })
             .chain(idx.iter().map(|x| item(x, None)))
             .map(|it| (score(&it, &tokens), it))
             .filter(|(s, _)| *s >= 0.0)
             .collect();
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(60).map(|(_, i)| i).collect()
+        let mut out: Vec<PItem> = scored.into_iter().take(30).map(|(_, i)| i).collect();
+        // then what's inside documents, transcripts and PDFs
+        for h in crate::search::hits_for(app, &raw) {
+            out.push(PItem {
+                k: hit_kind(h["k"].as_str().unwrap_or("")).to_string(),
+                t: crate::fmt::s(&h["t"]),
+                c: crate::fmt::s(&h["c"]),
+                h: h["h"].as_str().map(String::from),
+                cmd: None,
+                snippet: h["s"].as_str().map(String::from),
+                hit: Some(h),
+            });
+        }
+        out
     };
     app.palette.items = items;
     app.palette.sel = 0;
@@ -193,7 +235,9 @@ fn move_sel(app: &mut App, d: i64) {
 fn choose(app: &mut App, i: usize) {
     let Some(it) = app.palette.items.get(i).cloned() else { return };
     close(app);
-    if let Some(c) = it.cmd {
+    if let Some(h) = &it.hit {
+        crate::search::open_hit(app, h);
+    } else if let Some(c) = it.cmd {
         run_command(app, c);
     } else if let Some(h) = it.h {
         crate::nav::go(app, &h);
@@ -215,6 +259,20 @@ pub fn key(app: &mut App, key: Key, m: &Modifiers) -> bool {
         _ => return false,
     }
     true
+}
+
+/// A content hit's snippet: the matches (between \u{1} and \u{2}) marked.
+fn snippet(s: &str) -> Rich {
+    let tk = t();
+    let mut rich = Rich::new();
+    let mut on = false;
+    for part in s.split(['\u{1}', '\u{2}']) {
+        if !part.is_empty() {
+            rich.push(part, if on { Ts::new(12.5, 600, tk.text) } else { Ts::new(12.5, 400, tk.muted) });
+        }
+        on = !on;
+    }
+    rich
 }
 
 /// The text with each search word marked (mark: accent, 600).
@@ -258,6 +316,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
         return;
     }
     update(app);
+    crate::search::tick_palette(app);
     let tk = t();
     let screen = ctx.content_rect();
     let dim = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("palette-dim")));
@@ -283,7 +342,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 .text_color(tk.text)
                 .desired_width(w - 32.0)
                 .margin(egui::Margin::ZERO)
-                .hint_text(egui::RichText::new("Search courses, assignments, pages, files…").color(tk.muted).font(font)),
+                .hint_text(egui::RichText::new("Search everything: titles, pages, PDFs, transcripts…").color(tk.muted).font(font)),
         );
         if std::mem::take(&mut app.palette.focus) || !resp.has_focus() {
             resp.request_focus();
@@ -300,8 +359,11 @@ pub fn draw(app: &mut App, ctx: &Context) {
             }
             for i in 0..n {
                 let it = app.palette.items[i].clone();
-                let (r, resp) = ui.allocate_exact_size(vec2(w, 35.0), Sense::click());
+                let tall = it.snippet.is_some();
+                let (r, resp) = ui.allocate_exact_size(vec2(w, if tall { 54.0 } else { 35.0 }), Sense::click());
                 let row = r.shrink2(vec2(6.0, 0.0));
+                // a content hit: the title line on top, the snippet under it
+                let line = if tall { Rect::from_min_size(row.min, vec2(row.width(), 32.0)) } else { row };
                 if i == app.palette.sel {
                     ui.painter().rect_filled(row, cr(6.0), tk.hover);
                     if app.palette.scroll_sel {
@@ -310,13 +372,17 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 }
                 let x0 = row.min.x + 10.0;
                 let k = lay(ui, &it.k, Ts::new(11.0, 400, tk.faint), Some(82.0), true);
-                ui.painter().galley(pos2(x0, row.center().y - k.size().y / 2.0), k, tk.faint);
+                ui.painter().galley(pos2(x0, line.center().y - k.size().y / 2.0), k, tk.faint);
                 let cg = lay(ui, &it.c, Ts::new(12.0, 400, tk.muted), Some(w * 0.4), true);
                 let cw = cg.size().x;
-                ui.painter().galley(pos2(row.max.x - 10.0 - cw, row.center().y - cg.size().y / 2.0), cg, tk.muted);
+                ui.painter().galley(pos2(row.max.x - 10.0 - cw, line.center().y - cg.size().y / 2.0), cg, tk.muted);
                 let tw = row.max.x - 10.0 - cw - 10.0 - (x0 + 92.0);
                 let tg = highlighted(&it.t, &tokens).elide(tw.max(20.0)).lay(ui);
-                ui.painter().galley(pos2(x0 + 92.0, row.center().y - tg.size().y / 2.0), tg, tk.text);
+                ui.painter().galley(pos2(x0 + 92.0, line.center().y - tg.size().y / 2.0), tg, tk.text);
+                if let Some(sn) = &it.snippet {
+                    let g = snippet(sn).elide(row.max.x - 10.0 - (x0 + 92.0)).lay(ui);
+                    ui.painter().galley(pos2(x0 + 92.0, line.max.y - 4.0), g, tk.muted);
+                }
                 if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     chosen = Some(i);
                 }

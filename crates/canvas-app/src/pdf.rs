@@ -69,6 +69,8 @@ enum Job {
     Text { fid: String, page: usize },
     Links { fid: String, page: usize },
     Close { fid: String },
+    /// every page's text of a PDF on disk (for the search index)
+    Extract { path: PathBuf, reply: Box<dyn FnOnce(Option<Vec<String>>) + Send> },
 }
 
 /// The PDF's fingerprint as pdf.js computes it: the file's /ID, else an MD5 of its first 1KB.
@@ -103,7 +105,10 @@ fn library() -> Result<Pdfium, String> {
             }
         }
     }
-    Pdfium::bind_to_system_library().map(Pdfium::new).map_err(|e| format!("PDFium isn't available ({e})"))
+    Pdfium::bind_to_system_library().map(Pdfium::new).map_err(|e| {
+        log::warn!("PDFium: {e}");
+        "PDFium isn't installed (scripts/fetch-pdfium.sh gets it)".to_string()
+    })
 }
 
 fn page_text(page: &PdfPage) -> PageText {
@@ -202,10 +207,15 @@ fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
         Ok(p) => Box::leak(Box::new(p)),
         Err(e) => {
             for job in rx {
-                if let Job::Open { fid, .. } = job {
-                    let e = e.clone();
-                    let _ = tx.send(Msg::Apply(Box::new(move |app: &mut App| app.pdf.opened(&fid, Err(e)))));
-                    crate::app::wake();
+                match job {
+                    Job::Open { fid, .. } => {
+                        let e = e.clone();
+                        let _ = tx.send(Msg::Apply(Box::new(move |app: &mut App| app.pdf.opened(&fid, Err(e)))));
+                        crate::app::wake();
+                    }
+                    Job::Extract { reply, .. } => reply(None),
+                    Job::Render { reply, .. } => reply(None),
+                    _ => {}
                 }
             }
             return;
@@ -256,6 +266,10 @@ fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
             }
             Job::Close { fid } => {
                 docs.remove(&fid);
+            }
+            Job::Extract { path, reply } => {
+                let pages = pdfium.load_pdf_from_file(&path, None).ok().map(|doc| doc.pages().iter().map(|p| p.text().map(|t| t.all()).unwrap_or_default()).collect());
+                reply(pages);
             }
         }
     }
@@ -339,6 +353,11 @@ impl Pdfs {
             self.send(app_tx, job);
         }
         None
+    }
+
+    /// Extract every page's text from a PDF file (in the worker, between drawing jobs).
+    pub fn extract(&mut self, app_tx: &Sender<Msg>, path: PathBuf, reply: Box<dyn FnOnce(Option<Vec<String>>) + Send>) {
+        self.send(app_tx, Job::Extract { path, reply });
     }
 
     /// Render a page at a width in pixels (white background), for checkpoints' pictures.
@@ -480,7 +499,7 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
     }
     if let Some(e) = err {
         ui.add_space(24.0);
-        crate::widgets::text_block(ui, &format!("Couldn't show this PDF: {e}. Open it with the button above."), Ts::faint(14.0));
+        crate::widgets::text_block(ui, &format!("Couldn't show this PDF: {e}."), Ts::faint(14.0));
         return;
     }
     let info = app.pdf.info(fid).cloned().unwrap();
@@ -564,6 +583,8 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
             ctx.copy_text(text);
         }
     }
+    // a search hit in this PDF
+    crate::search::pdf(app, fid);
     // a link to a place in this PDF
     if let Some((f, page, y, start)) = app.pdf.scroll_to.take() {
         if f == fid {
@@ -625,6 +646,15 @@ fn slice_overlays(app: &mut App, ui: &mut Ui, fid: &str, key: &str, page: usize,
         }
     }
     crate::checkpoints::overlays(app, ui, key, page, y0, y1, r);
+    // a search hit's words, fading
+    let (marks, a) = crate::search::pdf_marks(app, fid, page);
+    for m in marks {
+        if m[3] < y0 || m[1] > y1 {
+            continue;
+        }
+        let mr = Rect::from_min_max(to_screen(m[0] - 0.003, m[1].max(y0)), to_screen(m[2] + 0.003, m[3].min(y1)));
+        ui.painter().rect_filled(mr, cr(2.0), Color32::from_rgba_unmultiplied(255, 196, 0, (110.0 * a) as u8));
+    }
     if adding {
         if let Some(p) = pointer {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);

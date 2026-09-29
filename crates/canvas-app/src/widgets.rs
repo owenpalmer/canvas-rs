@@ -581,6 +581,15 @@ pub fn focus_ring(ui: &Ui, rect: Rect, radius: f32) {
     ui.painter().rect_stroke(rect.expand(1.0), cr(radius + 1.0), Stroke::new(2.0, t().accent), StrokeKind::Outside);
 }
 
+/// Text centered on its letters (Inter's cap height, .727em) rather than its line box, so digits
+/// and capitals sit in the optical middle of a small pill.
+pub fn centered_caps(ui: &Ui, rect: Rect, text: &str, ts: Ts) {
+    let g = lay(ui, text, ts, None, false);
+    let baseline = g.rows.first().map(|r| r.pos.y + r.row.glyphs.first().map(|gl| gl.pos.y).unwrap_or(0.0)).unwrap_or(g.size().y * 0.8);
+    let y = rect.center().y + ts.size * 0.727 / 2.0 - baseline;
+    ui.painter().galley(pos2(rect.center().x - g.size().x / 2.0, y), g, ts.color);
+}
+
 pub fn centered_text(ui: &Ui, rect: Rect, text: &str, ts: Ts) {
     let g = lay(ui, text, ts, None, false);
     ui.painter().galley(rect.center() - g.size() / 2.0, g, ts.color);

@@ -1,0 +1,58 @@
+name: Release
+
+# Push a tag like v0.2.0 to build and publish a release; or run it by hand (Actions → Release →
+# Run workflow) to get the zip as a workflow artifact without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --workspace
+
+      - name: Package
+        shell: bash
+        run: |
+          scripts/fetch-pdfium.sh win-x64
+          out=dist/canvas-rs
+          mkdir -p "$out/licenses"
+          cp target/release/canvas-app.exe target/release/canvas-mcp.exe target/release/canvas-check.exe "$out/"
+          cp vendor/pdfium/win-x64/bin/pdfium.dll "$out/"
+          cp README.md "$out/"
+          cp vendor/pdfium/win-x64/LICENSE "$out/licenses/PDFium-LICENSE.txt"
+          cp assets/fonts/Inter-LICENSE.txt "$out/licenses/"
+          cp assets/fonts/katex/LICENSE "$out/licenses/KaTeX-LICENSE.txt"
+          cd dist && 7z a -tzip ../canvas-rs-windows-x64.zip canvas-rs
+
+      # The packaged MCP server answers every tool against sample data.
+      - name: Smoke test
+        shell: bash
+        env:
+          CANVAS_DEMO: "1"
+        run: |
+          export CANVAS_MCP_DIR="$RUNNER_TEMP/canvas-smoke"
+          dist/canvas-rs/canvas-mcp.exe --version
+          dist/canvas-rs/canvas-mcp.exe smoke
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canvas-rs-windows-x64
+          path: canvas-rs-windows-x64.zip
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" canvas-rs-windows-x64.zip \
+            --title "canvas-rs $GITHUB_REF_NAME" \
+            --notes "Windows x64. Unzip anywhere and run canvas-app.exe (canvas-app.exe --demo for sample data). canvas-mcp.exe is the MCP server. Windows may warn that the app isn't code-signed: More info → Run anyway."

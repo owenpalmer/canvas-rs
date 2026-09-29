@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/canvas-mcp", "crates/canvas-app"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

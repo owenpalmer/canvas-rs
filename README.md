@@ -16,6 +16,18 @@ It has two parts that share one local cache:
 Not affiliated with Instructure, Panopto, Anthropic, or Google. Works on Linux and Windows, with
 Firefox only: Chrome and Edge encrypt cookies in a way other programs can't read on Windows.
 
+## Install
+
+From the repository's **Releases** page:
+
+- **Linux:** `canvas-rs-linux-x64.tar.gz`. Unpack it and run `./install.sh`: it puts the app in
+  `~/.local/share/canvas-rs`, adds **Canvas** to your app launcher (with a "Sample data" action),
+  and links `canvas-app`, `canvas-mcp` and `canvas-check` into `~/.local/bin`. Run a newer
+  release's `install.sh` to update.
+- **Windows:** `canvas-rs-windows-x64.zip`. Unzip it anywhere and run `canvas-app.exe`. Windows may
+  say "Windows protected your PC" the first time, because the app isn't code-signed; click
+  *More info → Run anyway*.
+
 ## Build
 
 Needs a Rust toolchain (edition 2024) and PDFium for the PDF viewer:
@@ -24,6 +36,9 @@ Needs a Rust toolchain (edition 2024) and PDFium for the PDF viewer:
 scripts/fetch-pdfium.sh            # PDFium into vendor/pdfium/linux-x64 (or: scripts/fetch-pdfium.sh win-x64)
 cargo build --release
 ```
+
+`scripts/package-linux.sh` then makes the Linux release tarball (in `dist/`). Tagging `v*`
+builds and publishes both platforms' releases (`.github/workflows/release.yml`).
 
 This gives `target/release/canvas-app`, `target/release/canvas-mcp` and
 `target/release/canvas-check`. On Linux the app needs the usual windowing libraries (`libxkbcommon`,

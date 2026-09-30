@@ -55,6 +55,23 @@ pub struct Screenshot {
     pub keys: Vec<egui::Event>,
 }
 
+/// The logo: an accent rounded square, `n` pixels a side (RGBA).
+fn logo(n: u32) -> Vec<u8> {
+    let k = n as f32 / 64.0;
+    let (r, m) = (14.0 * k, 2.0 * k);
+    let mut rgba = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (cx, cy) = (fx.clamp(r + m, n as f32 - r - m), fy.clamp(r + m, n as f32 - r - m));
+            let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() - r;
+            let a = (0.5 - d).clamp(0.0, 1.0);
+            rgba.extend([0xb5, 0x46, 0x2f, (a * 255.0) as u8]);
+        }
+    }
+    rgba
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
@@ -148,6 +165,12 @@ pub fn screenshot_tick(app: &mut app::App, ctx: &egui::Context) {
 fn main() {
     timing::mark("main");
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // For launcher entries: the logo as a 256px PNG.
+    if let Some(path) = arg(&args, "--write-icon") {
+        let n = 256;
+        let ok = image::RgbaImage::from_raw(n, n, logo(n)).map(|img| img.save(&path).is_ok()).unwrap_or(false);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     let demo = args.iter().any(|a| a == "--demo");
     let dev = args.iter().any(|a| a == "--dev");
     // Started from the app's folder (a shortcut): anything we start (Firefox for signing in)
@@ -206,30 +229,7 @@ fn main() {
         Some([w.parse().ok()?, h.parse().ok()?])
     });
 
-    let prefs = canvas_mcp::prefs::load();
-    let pref_dark = match prefs.get("theme").and_then(|v| v.as_str()) {
-        Some("dark") => true,
-        Some("light") => false,
-        _ => read_system_dark().unwrap_or(false),
-    };
-    let bg = if pref_dark { [0x1d, 0x1b, 0x17] } else { [0xfb, 0xf7, 0xec] };
-    let icon = {
-        // The logo: an accent rounded square on the page color.
-        let n = 64u32;
-        let mut rgba = Vec::with_capacity((n * n * 4) as usize);
-        for y in 0..n {
-            for x in 0..n {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let r = 14.0;
-                let (cx, cy) = (fx.clamp(r + 2.0, n as f32 - r - 2.0), fy.clamp(r + 2.0, n as f32 - r - 2.0));
-                let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() - r;
-                let a = (0.5 - d).clamp(0.0, 1.0);
-                rgba.extend([0xb5, 0x46, 0x2f, (a * 255.0) as u8]);
-            }
-        }
-        egui::IconData { rgba, width: n, height: n }
-    };
-    let _ = bg;
+    let icon = egui::IconData { rgba: logo(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Canvas")

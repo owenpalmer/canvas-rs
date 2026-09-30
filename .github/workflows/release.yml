@@ -1,11 +1,17 @@
 name: Release
 
-# Push a tag like v0.2.0 to build and publish a release; or run it by hand (Actions → Release →
-# Run workflow) to get the zip as a workflow artifact without publishing.
+# Push a tag like v0.2.0 to build and publish a release. Or run it by hand (Actions → Release →
+# Run workflow): with a tag, the builds are added to that release (replacing ones of the same
+# name); without one, they're only kept as workflow artifacts.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release to add the builds to (e.g. v0.2.0); empty for artifacts only"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -47,12 +53,46 @@ jobs:
           name: canvas-rs-windows-x64
           path: canvas-rs-windows-x64.zip
 
-      - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
+  linux:
+    # the oldest supported image, so the build runs on older distributions' glibc too
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo build --release --locked --workspace
+      - run: scripts/package-linux.sh
+
+      - name: Smoke test
+        env:
+          CANVAS_DEMO: "1"
+        run: |
+          export CANVAS_MCP_DIR="$RUNNER_TEMP/canvas-smoke"
+          dist/canvas-rs/canvas-mcp --version
+          dist/canvas-rs/canvas-mcp smoke
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canvas-rs-linux-x64
+          path: dist/canvas-rs-linux-x64.tar.gz
+
+  publish:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create "$GITHUB_REF_NAME" canvas-rs-windows-x64.zip \
-            --title "canvas-rs $GITHUB_REF_NAME" \
-            --notes "Windows x64. Unzip anywhere and run canvas-app.exe (canvas-app.exe --demo for sample data). canvas-mcp.exe is the MCP server. Windows may warn that the app isn't code-signed: More info → Run anyway."
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" canvas-rs-windows-x64.zip canvas-rs-linux-x64.tar.gz --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" canvas-rs-windows-x64.zip canvas-rs-linux-x64.tar.gz -R "$GITHUB_REPOSITORY" \
+              --title "canvas-rs $TAG" \
+              --notes "Windows: unzip anywhere and run canvas-app.exe (it may warn that the app isn't code-signed: More info → Run anyway). Linux: unpack and run ./install.sh, which adds Canvas to your app launcher and canvas-app / canvas-mcp to ~/.local/bin. canvas-app --demo shows sample data."
+          fi

@@ -1,3 +1,4 @@
 /target/
 /vendor/
 *.bak
+dist/

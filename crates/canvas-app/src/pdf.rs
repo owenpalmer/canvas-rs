@@ -112,24 +112,71 @@ fn library() -> Result<Pdfium, String> {
     })
 }
 
+/// Where a page's PDF coordinates land on the page as drawn: PDFium draws the crop box (which
+/// needn't start at 0,0), turned by the page's rotation.
+#[derive(Clone, Copy)]
+struct Frame {
+    l: f32,
+    b: f32,
+    r: f32,
+    t: f32,
+    rot: u16,
+}
+
+impl Frame {
+    fn of(page: &PdfPage) -> Frame {
+        let bx = page.boundaries();
+        let rect = bx.crop().or_else(|_| bx.media()).map(|b| b.bounds).ok();
+        let (l, b, r, t) = match rect {
+            Some(rc) if rc.width().value > 0.0 && rc.height().value > 0.0 => (rc.left().value, rc.bottom().value, rc.right().value, rc.top().value),
+            _ => (0.0, 0.0, page.width().value, page.height().value),
+        };
+        let rot = match page.rotation() {
+            Ok(PdfPageRenderRotation::Degrees90) => 90,
+            Ok(PdfPageRenderRotation::Degrees180) => 180,
+            Ok(PdfPageRenderRotation::Degrees270) => 270,
+            _ => 0,
+        };
+        Frame { l, b, r, t, rot }
+    }
+
+    /// A point as fractions of the drawn page (y down).
+    fn at(&self, x: f32, y: f32) -> (f32, f32) {
+        let (w, h) = ((self.r - self.l).max(1e-3), (self.t - self.b).max(1e-3));
+        let (u, v) = ((x - self.l) / w, (y - self.b) / h); // 0..1, y up
+        match self.rot {
+            90 => (v, u),
+            180 => (1.0 - u, v),
+            270 => (1.0 - v, 1.0 - u),
+            _ => (u, 1.0 - v),
+        }
+    }
+
+    /// A rectangle as [x0, top, x1, bottom] fractions of the drawn page.
+    fn rect(&self, rc: &PdfRect) -> [f32; 4] {
+        let (ax, ay) = self.at(rc.left().value, rc.bottom().value);
+        let (bx, by) = self.at(rc.right().value, rc.top().value);
+        [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]
+    }
+
+    /// The drawn page's height in points (a font size over it is a fraction of the page).
+    fn height(&self) -> f32 {
+        if self.rot == 90 || self.rot == 270 { self.r - self.l } else { self.t - self.b }.max(1e-3)
+    }
+}
+
 fn page_text(page: &PdfPage) -> PageText {
     let (pw, ph) = (page.width().value, page.height().value);
+    let fr = Frame::of(page);
     let mut chars = Vec::new();
     if let Ok(text) = page.text() {
         for c in text.chars().iter() {
             let Some(ch) = c.unicode_char() else { continue };
             let b = c.loose_bounds().unwrap_or(PdfRect::ZERO);
-            let base = c.origin_y().map(|y| y.value).unwrap_or(b.bottom().value);
+            let [x0, top, x1, bottom] = fr.rect(&b);
+            let base = c.origin().ok().map(|(x, y)| fr.at(x.value, y.value)).map(|(_, y)| y).unwrap_or(bottom);
             let size = c.scaled_font_size().value;
-            chars.push(Ch {
-                c: ch,
-                x0: b.left().value / pw,
-                x1: b.right().value / pw,
-                top: 1.0 - b.top().value / ph,
-                bottom: 1.0 - b.bottom().value / ph,
-                base: 1.0 - base / ph,
-                h: size / ph,
-            });
+            chars.push(Ch { c: ch, x0, x1, top, bottom, base, h: size / fr.height() });
         }
     }
     // runs on a line (like pdf.js's text items); a newline ends one (eol)
@@ -180,14 +227,14 @@ fn page_text(page: &PdfPage) -> PageText {
 /// Where a destination points: (page index, fraction of the page's height from the top).
 fn dest_pos(doc: &PdfDocument, d: &PdfDestination) -> Option<(usize, f32)> {
     let idx = d.page_index().ok()? as usize;
-    let h = doc.pages().get(idx as PdfPageIndex).map(|p| p.height().value).ok()?;
+    let fr = doc.pages().get(idx as PdfPageIndex).map(|p| Frame::of(&p)).ok()?;
     let top = match d.view_settings().ok()? {
         PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _) => y.map(|y| y.value),
         PdfDestinationViewSettings::FitPageHorizontallyToWindow(y) | PdfDestinationViewSettings::FitBoundsHorizontallyToWindow(y) => y.map(|y| y.value),
         PdfDestinationViewSettings::FitPageToRectangle(r) => Some(r.top().value),
         _ => None,
     };
-    Some((idx, top.map(|y| (1.0 - y / h).clamp(0.0, 1.0)).unwrap_or(0.0)))
+    Some((idx, top.map(|y| fr.at(fr.l, y).1.clamp(0.0, 1.0)).unwrap_or(0.0)))
 }
 
 /// An entry in a PDF's outline (its bookmarks: chapters, sections, the glossary…), in document
@@ -231,11 +278,11 @@ fn outline(doc: &PdfDocument) -> Vec<OutlineItem> {
 }
 
 fn page_links(doc: &PdfDocument, page: &PdfPage) -> Vec<Link> {
-    let (pw, ph) = (page.width().value, page.height().value);
+    let fr = Frame::of(page);
     let mut out = Vec::new();
     for l in page.links().iter() {
         let Ok(r) = l.rect() else { continue };
-        let rect = [r.left().value / pw, 1.0 - r.top().value / ph, r.right().value / pw, 1.0 - r.bottom().value / ph];
+        let rect = fr.rect(&r);
         let url = l.action().and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok())).filter(|u| u.starts_with("http://") || u.starts_with("https://"));
         let dest_of = |d: PdfDestination| dest_pos(doc, &d);
         let dest = l.destination().and_then(dest_of).or_else(|| l.action().and_then(|a| a.as_local_destination_action().and_then(|d| d.destination().ok().and_then(dest_of))));
@@ -389,13 +436,17 @@ pub struct Pdfs {
     pub restore: HashMap<String, (usize, f32)>,
     /// fullscreen: pages no wider than this, centered
     pub max_w: Option<f32>,
+    /// how much of the viewer's top the pinned reader bar covers
+    pub top_inset: f32,
+    /// per PDF: when a saved place was last gone back to (the scroll lands a frame later)
+    pub restored: HashMap<String, Instant>,
 }
 
 const KEEP: usize = 4;
 
 impl Pdfs {
     pub fn new() -> Pdfs {
-        Pdfs { tx: None, docs: HashMap::new(), order: Vec::new(), sel: None, scroll_to: None, contents: false, expanded: HashMap::new(), restore: HashMap::new(), max_w: None }
+        Pdfs { tx: None, docs: HashMap::new(), order: Vec::new(), sel: None, scroll_to: None, contents: false, expanded: HashMap::new(), restore: HashMap::new(), max_w: None, top_inset: 0.0, restored: HashMap::new() }
     }
 
     fn send(&mut self, app_tx: &Sender<Msg>, job: Job) {
@@ -605,7 +656,8 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
     let adding = app.cp.adding;
     // content coordinates: y from the top of the viewer's scrolling content
     let origin = clip.min.y - app.viewer.scroll;
-    crate::checkpoints::set_view(app, clip, origin);
+    let below_bar = Rect::from_min_max(pos2(clip.min.x, clip.min.y + app.pdf.top_inset), clip.max);
+    crate::checkpoints::set_view(app, below_bar, origin);
     let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
     for (pi, &(pw, ph)) in info.pages.iter().enumerate() {
         let page_h = width * ph / pw;
@@ -668,11 +720,24 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
             ctx.copy_text(text);
         }
     }
-    // a textbook opens where you left it
+    // a textbook opens where you left it; the layout above may still settle for a few frames
+    // (checkpoints measuring themselves), so keep aiming until the place stays put
     if let Some((page, y)) = app.pdf.restore.get(fid).copied() {
-        if content_y(app, fid, page, y).is_some() {
-            app.pdf.restore.remove(fid);
-            scroll_pdf_to(app, fid, page, y, READ_LINE);
+        if let Some(cy) = content_y(app, fid, page, y) {
+            let want = (cy - app.pdf.top_inset - READ_LINE).max(0.0);
+            let since = *app.pdf.restored.entry(fid.to_string()).or_insert_with(Instant::now);
+            if (app.viewer.scroll - want).abs() > 2.0 {
+                app.viewer.scroll_to = Some(want);
+                ctx.request_repaint();
+            } else if since.elapsed().as_millis() > 300 {
+                app.pdf.restore.remove(fid);
+                app.pdf.restored.insert(fid.to_string(), Instant::now());
+            } else {
+                ctx.request_repaint();
+            }
+            if since.elapsed().as_secs() > 3 {
+                app.pdf.restore.remove(fid); // give up chasing
+            }
         }
     }
     // a search hit in this PDF
@@ -680,7 +745,8 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
     // a link to a place in this PDF
     if let Some((f, page, y, start)) = app.pdf.scroll_to.take() {
         if f == fid {
-            scroll_pdf_to(app, fid, page, y, if start { 12.0 } else { app.viewer.viewport_h * 0.3 });
+            let off = if start { app.pdf.top_inset + 12.0 } else { app.viewer.viewport_h * 0.3 };
+            scroll_pdf_to(app, fid, page, y, off);
         }
     }
 }
@@ -706,7 +772,10 @@ fn slice_overlays(app: &mut App, ui: &mut Ui, fid: &str, key: &str, page: usize,
     let to_screen = |fx: f32, fy: f32| pos2(r.min.x + fx * r.width(), r.min.y + (fy - y0) / (y1 - y0) * r.height());
     let text = app.pdf.docs.get(fid).and_then(|d| d.text.get(&page).cloned());
     let links = app.pdf.docs.get(fid).and_then(|d| d.links.get(&page).cloned()).unwrap_or_default();
-    let resp = ui.interact(r, Id::new(("pdf-slice", fid, page, (y0 * 1000.0) as i32)), Sense::click_and_drag());
+    // a finger on the page scrolls it (the scroll area takes the drag); a mouse selects text
+    // (a drag the page already took is kept to its end, scrolling below)
+    let id = Id::new(("pdf-slice", fid, page, (y0 * 1000.0) as i32));
+    let resp = ui.interact(r, id, if app.finger && !ui.ctx().is_being_dragged(id) { Sense::click() } else { Sense::click_and_drag() });
     let pointer = resp.hover_pos();
     // selection highlight
     if let (Some(s), Some(t_)) = (&app.pdf.sel, &text) {
@@ -772,8 +841,15 @@ fn slice_overlays(app: &mut App, ui: &mut Ui, fid: &str, key: &str, page: usize,
     } else if pointer.is_some() && text.as_ref().map(|t| !t.chars.is_empty()).unwrap_or(false) {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
     }
+    // a finger that landed while the page still took drags (the first touch after the mouse)
+    // scrolls it instead of selecting
+    if app.finger && resp.dragged() {
+        let dy = ui.input(|i| i.pointer.delta().y);
+        app.viewer.scroll_to = Some((app.viewer.scroll - dy).max(0.0));
+        ui.ctx().request_repaint();
+    }
     // text selection by dragging
-    if let (Some(t_), Some(p)) = (&text, resp.interact_pointer_pos()) {
+    if let (Some(t_), Some(p)) = (&text, resp.interact_pointer_pos().filter(|_| !app.finger)) {
         let fx = (p.x - r.min.x) / r.width();
         let fy = y0 + (p.y - r.min.y) / r.height() * (y1 - y0);
         let ci = char_at(t_, fx, fy);
@@ -802,6 +878,19 @@ fn slice_overlays(app: &mut App, ui: &mut Ui, fid: &str, key: &str, page: usize,
 #[cfg(test)]
 mod tests {
     use pdfium_render::prelude::*;
+
+    /// CHARS_PDF=/path/book.pdf CHARS_PAGE=62 cargo test -p canvas-app chars_of -- --nocapture
+    #[test]
+    fn chars_of() {
+        let Ok(path) = std::env::var("CHARS_PDF") else { return };
+        let page: i32 = std::env::var("CHARS_PAGE").ok().and_then(|p| p.parse().ok()).unwrap_or(1);
+        let pdfium = super::library().unwrap();
+        let doc = pdfium.load_pdf_from_file(&path, None).unwrap();
+        let t = super::page_text(&doc.pages().get(page - 1).unwrap());
+        for it in t.items.iter().take(6) {
+            println!("x={:.4} base={:.4} {:?}", it.x, it.y, it.s);
+        }
+    }
 
     /// OUTLINE_PDF=/path/book.pdf cargo test -p canvas-app outline_of -- --nocapture
     #[test]
@@ -849,7 +938,7 @@ const READ_LINE: f32 = 40.0;
 /// fraction), from where the pages were drawn last frame.
 pub fn current_pos(app: &App, fid: &str) -> Option<f32> {
     let d = app.pdf.docs.get(fid)?;
-    let y = app.viewer.scroll + READ_LINE;
+    let y = app.viewer.scroll + app.pdf.top_inset + READ_LINE;
     let (page, (top, h)) = d.page_y.iter().filter(|(_, (top, _))| *top <= y).max_by(|a, b| a.1.0.total_cmp(&b.1.0))?;
     Some(*page as f32 + ((y - top) / h.max(1.0)).clamp(0.0, 0.999))
 }
@@ -865,8 +954,9 @@ pub fn fid_of(app: &App, href: &str) -> Option<String> {
 }
 
 // ---------- the reader's bar and its Contents panel ----------
-/// The PDF's one-row bar: its name (cut to fit) and size, then Contents (when it has an outline),
-/// Checkpoints, Fullscreen and, for a Canvas file, Canvas ↗.
+/// The PDF's bar: its name (cut to fit) and size, then Contents (when it has an outline),
+/// Checkpoints, Fullscreen and, for a Canvas file, Canvas ↗; on two rows when the viewer is
+/// narrow. Scrolled past, it stays pinned at the top of the viewer.
 pub fn reader_bar(app: &mut App, ui: &mut Ui, fid: &str, name: &str, size: &str, canvas_url: Option<&str>) {
     let tk = t();
     let outline = app.pdf.info(fid).map(|i| !i.outline.is_empty()).unwrap_or(false);
@@ -888,26 +978,39 @@ pub fn reader_bar(app: &mut App, ui: &mut Ui, fid: &str, name: &str, size: &str,
     // narrow: the name on its own line, the buttons under it
     let two_rows = avail - btn_w - 20.0 < 200.0;
     let title_w = if two_rows { avail } else { (avail - btn_w - size_w - 20.0).max(60.0) };
-    let (row, _) = ui.allocate_exact_size(vec2(avail, 34.0), Sense::hover());
+    let block_h = if two_rows { 34.0 + 38.0 } else { 34.0 };
+    app.pdf.top_inset = if full { 0.0 } else { block_h + 12.0 };
+    let (natural, _) = ui.allocate_exact_size(vec2(avail, block_h), Sense::hover());
+    ui.add_space(8.0);
+    // pinned: once scrolled past, drawn at the top of the viewer, over the pages
+    let clip = ui.clip_rect();
+    let stuck = !full && natural.min.y < clip.min.y + 6.0;
+    let block = if stuck { natural.translate(vec2(0.0, clip.min.y + 6.0 - natural.min.y)) } else { natural };
+    let layer = egui::LayerId::new(egui::Order::Middle, Id::new(("reader-bar", fid)));
+    let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(block).layer_id(layer).id_salt(("reader-bar", fid)));
+    bar_ui.set_clip_rect(clip);
+    if stuck {
+        let bg = Rect::from_min_max(pos2(clip.min.x, clip.min.y), pos2(clip.max.x, block.max.y + 6.0));
+        let p = bar_ui.painter();
+        p.add(egui::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha(40) }.as_shape(bg, 0));
+        p.rect_filled(bg, 0.0, tk.bg);
+        p.hline(bg.x_range(), bg.max.y - 0.5, egui::Stroke::new(1.0, tk.line));
+    }
+    let row = Rect::from_min_size(block.min, vec2(avail, 34.0));
     let ts = Ts::new(14.0, 650, tk.text).sp(-0.01);
     let g = crate::widgets::lay(ui, name, ts, Some(title_w), true);
     let whole = crate::widgets::lay(ui, name, ts, None, false).size().x <= g.size().x + 1.0;
     let gw = g.size().x;
     let title_rect = Rect::from_min_size(pos2(row.min.x, row.center().y - g.size().y / 2.0), g.size());
-    ui.painter().galley(title_rect.min, g, tk.text);
-    ui.interact(title_rect, Id::new(("pdf-title", fid)), Sense::hover()).on_hover_text(name);
+    bar_ui.painter().galley(title_rect.min, g, tk.text);
+    bar_ui.interact(title_rect, Id::new(("pdf-title", fid)), Sense::hover()).on_hover_text(name);
     if whole && !size.is_empty() && gw + 8.0 + size_w <= avail {
         let sg = crate::widgets::lay(ui, size, Ts::faint(12.0), None, false);
-        ui.painter().galley(pos2(row.min.x + gw + 8.0, row.center().y - sg.size().y / 2.0), sg, tk.faint);
+        bar_ui.painter().galley(pos2(row.min.x + gw + 8.0, row.center().y - sg.size().y / 2.0), sg, tk.faint);
     }
-    let bar_rect = if two_rows {
-        let (r2, _) = ui.allocate_exact_size(vec2(avail, 38.0), Sense::hover());
-        r2
-    } else {
-        row
-    };
+    let bar_rect = if two_rows { Rect::from_min_size(pos2(block.min.x, block.min.y + 34.0), vec2(avail, 38.0)) } else { row };
     let layout = if two_rows { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) };
-    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(bar_rect).layout(layout));
+    let mut bar = bar_ui.new_child(egui::UiBuilder::new().max_rect(bar_rect).layout(layout));
     bar.spacing_mut().item_spacing.x = 6.0;
     let mut order = vec!["contents", "checkpoints", "fullscreen", "canvas"];
     if !two_rows {
@@ -940,7 +1043,6 @@ pub fn reader_bar(app: &mut App, ui: &mut Ui, fid: &str, name: &str, size: &str,
             _ => {}
         }
     }
-    ui.add_space(8.0);
 }
 
 pub fn set_contents(app: &mut App, on: bool) {
@@ -954,7 +1056,8 @@ pub fn section_at(outline: &[OutlineItem], pos: f32) -> Option<usize> {
 }
 
 /// The Contents panel: the outline as a tree (chapters open to their sections), the section
-/// you're in marked. Tapping a title goes there; the arrow opens or closes it.
+/// you're in marked. Tapping an entry goes there and opens (or closes) its sections; the arrow
+/// only opens or closes them.
 pub fn contents(app: &mut App, ui: &mut Ui, fid: &str) {
     let tk = t();
     let Some(info) = app.pdf.info(fid).cloned() else { return };
@@ -1026,8 +1129,12 @@ pub fn contents(app: &mut App, ui: &mut Ui, fid: &str) {
         let tx = r.min.x + tx_off;
         ui.painter().galley(pos2(tx, r.center().y - g.size().y / 2.0), g, ts.color);
         ui.painter().galley(pos2(r.max.x - 12.0 - pw, r.center().y - pgg.size().y / 2.0), pgg, tk.faint);
+        // tapping an entry goes there; one with sections under it also opens or closes them
         if resp.clicked() && !(kids && arrow.contains(resp.interact_pointer_pos().unwrap_or_default())) {
             go = Some(i);
+            if kids {
+                toggle = Some(i);
+            }
         }
         resp.on_hover_cursor(CursorIcon::PointingHand);
     }
@@ -1049,10 +1156,12 @@ pub fn contents(app: &mut App, ui: &mut Ui, fid: &str) {
     if let Some(i) = go {
         let it = &items[i];
         let y = crate::checkpoints::heading_y(app, fid, it).unwrap_or(it.y);
-        scroll_pdf_to(app, fid, it.page, y, 12.0);
+        let off = app.pdf.top_inset + 12.0;
+        scroll_pdf_to(app, fid, it.page, y, off);
         // the page may not be laid out yet (far away): go there once it is
         if content_y(app, fid, it.page, y).is_none() {
             app.pdf.restore.insert(fid.to_string(), (it.page, y));
+            app.pdf.restored.remove(fid);
         }
     }
 }

@@ -244,6 +244,7 @@ pub fn book_view(app: &mut App, ui: &mut Ui, pane: Pane, id: &str) -> Result<(),
     if app.books.opened.insert(id.to_string()) {
         if let Some(pos) = b["position"].as_f64() {
             app.pdf.restore.insert(fid.clone(), (pos as usize, (pos.fract()) as f32));
+            app.pdf.restored.remove(&fid);
         }
         let svc = app.svc.clone();
         let i = id.to_string();
@@ -260,8 +261,8 @@ pub fn book_view(app: &mut App, ui: &mut Ui, pane: Pane, id: &str) -> Result<(),
 /// Every few seconds while reading: where you are (and the page count, once known).
 fn save_place(app: &mut App, id: &str, fid: &str, b: &Value) {
     let Some(pos) = crate::pdf::current_pos(app, fid) else { return };
-    // not while a saved place is still being gone back to
-    if app.pdf.restore.contains_key(fid) {
+    // not while a saved place is still being gone back to (the scroll lands a frame or two later)
+    if app.pdf.restore.contains_key(fid) || app.pdf.restored.get(fid).map(|t| t.elapsed() < Duration::from_millis(800)).unwrap_or(false) {
         return;
     }
     let pages = app.pdf.info(fid).map(|i| i.pages.len());

@@ -1131,7 +1131,7 @@ pub fn overlays(app: &mut App, ui: &mut Ui, key: &str, page: usize, y0: f32, y1:
             let ph = (tm / 1.2) % 2.0;
             let x = if ph < 1.0 { ph } else { 2.0 - ph };
             let op = 1.0 - 0.45 * crate::anim::ease_in_out(x);
-            guide(ui, r, to_y(py), true, op);
+            guide(ui, r, to_y(py), if app.touch_mode() { 2 } else { 1 }, op);
             ui.ctx().request_repaint();
         }
     }
@@ -1139,10 +1139,13 @@ pub fn overlays(app: &mut App, ui: &mut Ui, key: &str, page: usize, y0: f32, y1:
 
 /// The line that follows the mouse while placing a checkpoint.
 pub fn follow_guide(ui: &mut Ui, r: Rect, y: f32) {
-    guide(ui, r, y, false, 1.0);
+    guide(ui, r, y, 0, 1.0);
 }
 
-fn guide(ui: &Ui, r: Rect, y: f32, pending: bool, op: f32) {
+/// The checkpoint line across a slice: `kind` 0 follows the mouse, 1 is a proposed checkpoint
+/// (keys), 2 a proposed one in touch mode.
+fn guide(ui: &Ui, r: Rect, y: f32, kind: u8, op: f32) {
+    let pending = kind > 0;
     let tk = t();
     let p = ui.painter().with_clip_rect(ui.clip_rect());
     let c = theme::alpha(tk.accent, op);
@@ -1159,7 +1162,11 @@ fn guide(ui: &Ui, r: Rect, y: f32, pending: bool, op: f32) {
     let white = theme::alpha(Color32::WHITE, op);
     let ts = Ts::new(12.0, 600, white);
     let parts: Vec<(&str, bool)> = if pending {
-        vec![("Press ", false), ("C", true), (" again to add the checkpoint here · ", false), ("Esc", true), (" cancels", false)]
+        if kind == 2 {
+            vec![("Tap ✓ to add the checkpoint here", false)]
+        } else {
+            vec![("Press ", false), ("C", true), (" again to add the checkpoint here · ", false), ("Esc", true), (" cancels", false)]
+        }
     } else {
         vec![("＋ Check understanding up to here", false)]
     };
@@ -1942,5 +1949,97 @@ mod tests {
         assert!((segs[2].y1 - 0.25).abs() < 1e-6);
         assert_eq!(to_base36(35), "z");
         assert_eq!(esc("<a & 'b'>"), "&lt;a &amp; &#39;b&#39;&gt;");
+    }
+}
+
+// ---------- touch mode: on-screen buttons for reading ----------
+/// A round reading button's look (CheckpointReader's .read-ctl): 54px, a shadow, the icon.
+fn round_button(ui: &Ui, layer: &egui::Painter, r: Rect, id: Id, icon: &str, accent: bool, filled: bool, enabled: bool) -> bool {
+    let tk = t();
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+    let pressed = resp.is_pointer_button_down_on();
+    let r = if pressed { r.shrink(r.width() * 0.04) } else { r };
+    let alpha: f32 = if enabled { 1.0 } else { 0.4 };
+    layer.add(egui::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha((46.0 * alpha) as u8) }.as_shape(r, cr(r.width() / 2.0)));
+    let (bg, border, fg) = if filled {
+        (tk.accent, tk.accent, Color32::WHITE)
+    } else {
+        let hot = resp.hovered() && enabled;
+        (tk.panel_solid, if hot { tk.accent } else { tk.line }, if accent || hot { tk.accent } else { tk.text })
+    };
+    layer.circle_filled(r.center(), r.width() / 2.0, theme::alpha(bg, alpha.max(0.85)));
+    layer.circle_stroke(r.center(), r.width() / 2.0 - 0.5, Stroke::new(1.0, theme::alpha(border, alpha)));
+    let c = r.center();
+    let st = Stroke::new(2.0, theme::alpha(fg, alpha));
+    let line = |pts: Vec<Pos2>| {
+        layer.add(egui::Shape::line(pts, st));
+    };
+    match icon {
+        "up" => line(vec![c + vec2(-7.0, 3.5), c + vec2(0.0, -3.5), c + vec2(7.0, 3.5)]),
+        "down" => line(vec![c + vec2(-7.0, -3.5), c + vec2(0.0, 3.5), c + vec2(7.0, -3.5)]),
+        "plus" => {
+            line(vec![c + vec2(-8.0, 0.0), c + vec2(8.0, 0.0)]);
+            line(vec![c + vec2(0.0, -8.0), c + vec2(0.0, 8.0)]);
+        }
+        "check" => line(vec![c + vec2(-8.0, 0.5), c + vec2(-2.5, 6.0), c + vec2(8.5, -6.0)]),
+        _ => {
+            line(vec![c + vec2(-6.5, -6.5), c + vec2(6.5, 6.5)]);
+            line(vec![c + vec2(6.5, -6.5), c + vec2(-6.5, 6.5)]);
+        }
+    }
+    let tip = match icon {
+        "up" => "Previous sentence",
+        "down" => "Next sentence",
+        "plus" => "A checkpoint after this sentence",
+        "check" => "Add the checkpoint here",
+        _ => "Cancel",
+    };
+    enabled && resp.on_hover_text(tip).clicked()
+}
+
+/// In touch mode, while adding checkpoints to the PDF in the viewer: ↑ / ↓ to step through the
+/// sentences, + to propose a checkpoint after the highlighted one (✓ to add it, × to cancel), in a
+/// bottom corner of the viewer.
+pub fn read_controls(app: &mut App, root: &mut Ui, viewer: Rect) {
+    if !app.touch_mode() || !app.cp.mode || app.palette.open || app.keys_open {
+        return;
+    }
+    let Some(key) = current_key(app) else { return };
+    let Some(st) = app.cp.docs.get(&key) else { return };
+    let (sent, pending) = (st.sent, st.pending_cut.is_some());
+    let left = app.prefs.str("readControls") == "left";
+    let size = 54.0;
+    let x = if left { viewer.min.x + 16.0 } else { viewer.max.x - 16.0 - size };
+    let layer = root.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("read-controls")));
+    // bottom up: ↓, ↑, then the checkpoint button (8px further), then ×
+    let mut y = viewer.max.y - 20.0 - size;
+    let mut act = None;
+    if round_button(root, &layer, Rect::from_min_size(pos2(x, y), vec2(size, size)), Id::new("rc-next"), "down", false, false, true) {
+        act = Some("next");
+    }
+    y -= size + 10.0;
+    if round_button(root, &layer, Rect::from_min_size(pos2(x, y), vec2(size, size)), Id::new("rc-prev"), "up", false, false, true) {
+        act = Some("prev");
+    }
+    y -= size + 18.0;
+    if round_button(root, &layer, Rect::from_min_size(pos2(x, y), vec2(size, size)), Id::new("rc-cut"), if pending { "check" } else { "plus" }, true, pending, sent >= 0) {
+        act = Some("cut");
+    }
+    if pending {
+        y -= size + 10.0;
+        if round_button(root, &layer, Rect::from_min_size(pos2(x, y), vec2(size, size)), Id::new("rc-cancel"), "x", false, false, true) {
+            act = Some("cancel");
+        }
+    }
+    match act {
+        Some("next") => step_sentence(app, &key, 1),
+        Some("prev") => step_sentence(app, &key, -1),
+        Some("cut") => checkpoint_here(app, &key),
+        Some("cancel") => {
+            if let Some(st) = app.cp.docs.get_mut(&key) {
+                st.pending_cut = None;
+            }
+        }
+        _ => {}
     }
 }

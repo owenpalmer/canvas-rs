@@ -54,6 +54,8 @@ pub struct Screenshot {
     pub actions: Vec<String>,
     /// scripted key presses, delivered at the start of the next frame
     pub keys: Vec<egui::Event>,
+    /// scripted pointer and touch input, one batch per frame, fed in as raw input
+    pub frames: std::collections::VecDeque<Vec<egui::Event>>,
 }
 
 /// The logo: an accent rounded square, `n` pixels a side (RGBA).
@@ -156,8 +158,11 @@ pub fn screenshot_tick(app: &mut app::App, ctx: &egui::Context) {
         return;
     }
     let s = app.screenshot.as_mut().unwrap();
-    if !s.requested && s.actions.is_empty() && s.start.elapsed().as_secs_f32() >= s.wait {
+    if s.actions.is_empty() && s.frames.is_empty() && s.start.elapsed().as_secs_f32() >= s.wait {
+        // asked again every 2s until it arrives (a request can be lost to a discarded pass)
         s.requested = true;
+        s.start = Instant::now();
+        s.wait = 2.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
     }
     ctx.request_repaint_after(Duration::from_millis(50));
@@ -223,6 +228,7 @@ fn main() {
         requested: false,
         start: Instant::now(),
         keys: Vec::new(),
+        frames: Default::default(),
         actions: arg(&args, "--actions").map(|a| a.split(';').map(String::from).filter(|s| !s.is_empty()).collect()).unwrap_or_default(),
     });
     let size = arg(&args, "--size").and_then(|s| {

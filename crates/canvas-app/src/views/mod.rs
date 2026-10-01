@@ -622,6 +622,44 @@ pub fn script(app: &mut App, ctx: &egui::Context, act: &str) {
                 }
             }
         }
+        // a press, a drag in steps, a release (with ",touch": as a finger, the way winit reports
+        // one: touch events plus the pointer events they move)
+        "drag" | "tap" => {
+            let v: Vec<&str> = arg.split(',').collect();
+            let n: Vec<f32> = v.iter().filter_map(|x| x.trim().parse().ok()).collect();
+            let touch = v.last().map(|x| x.trim() == "touch").unwrap_or(false);
+            let (p0, p1) = match (verb, n.as_slice()) {
+                ("tap", [x, y, ..]) => (egui::pos2(*x, *y), egui::pos2(*x, *y)),
+                ("drag", [x0, y0, x1, y1, ..]) => (egui::pos2(*x0, *y0), egui::pos2(*x1, *y1)),
+                _ => return,
+            };
+            let dev = egui::TouchDeviceId(1);
+            let tid = egui::TouchId(1);
+            let t = |phase, pos| egui::Event::Touch { device_id: dev, id: tid, phase, pos, force: None };
+            let btn = |pressed, pos| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let Some(s) = app.screenshot.as_mut() else { return };
+            let mut first = vec![egui::Event::PointerMoved(p0), btn(true, p0)];
+            if touch {
+                first.insert(0, t(egui::TouchPhase::Start, p0));
+            }
+            s.frames.push_back(first);
+            let steps = if verb == "tap" { 0 } else { 12 };
+            for i in 1..=steps {
+                let p = p0 + (p1 - p0) * (i as f32 / steps as f32);
+                let mut f = vec![egui::Event::PointerMoved(p)];
+                if touch {
+                    f.insert(0, t(egui::TouchPhase::Move, p));
+                }
+                s.frames.push_back(f);
+            }
+            let mut last = vec![btn(false, p1)];
+            if touch {
+                last.insert(0, t(egui::TouchPhase::End, p1));
+                last.push(egui::Event::PointerGone);
+            }
+            s.frames.push_back(last);
+            ctx.request_repaint();
+        }
         "palette" => {
             crate::palette::open(app);
             app.palette.query = arg.to_string();

@@ -185,6 +185,9 @@ pub fn draw(app: &mut App, root: &mut Ui, frame: &mut eframe::Frame) {
     if !lay.bare {
         resize_handles(app, root, &lay, screen);
     }
+    if let Some(v) = lay.viewer {
+        crate::checkpoints::read_controls(app, root, v);
+    }
     if app.panes.controls_w > 0.0 {
         window_controls(root, screen);
     }
@@ -311,48 +314,81 @@ fn fullscreen_bar(app: &mut App, root: &mut Ui, screen: Rect) {
     }
 }
 
-/// Dragging an edge resizes the sidebar or the viewer; double-click resets.
+/// Dragging an edge (or the grab tab in its middle) resizes the sidebar or the viewer;
+/// double-click resets. The tab sits above the panes, so a finger on it always gets it, and the
+/// edge follows from the moment it's pressed (no drag threshold), keeping where it was grabbed.
 fn resize_handles(app: &mut App, root: &mut Ui, lay: &Layout, screen: Rect) {
     let tk = t();
-    let handle = |which: &str, x: f32| -> Option<(egui::Response, bool)> {
-        let r = Rect::from_min_max(pos2(x - 4.0, screen.min.y), pos2(x + 4.0, screen.max.y));
+    let touch = app.touch_mode();
+    let ctx = root.ctx().clone();
+    // returns the edge's new x while it's held, and whether it was just let go
+    let mut handle = |which: &str, x: f32| -> (Option<f32>, bool, bool) {
         let id = Id::new(("resize", which));
-        let resp = root.interact(r, id, Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeColumn);
-        let active = resp.hovered() || resp.dragged();
-        let fg = root.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("resize-line")));
+        let strip = Rect::from_min_max(pos2(x - if touch { 8.0 } else { 4.0 }, screen.min.y), pos2(x + if touch { 8.0 } else { 4.0 }, screen.max.y));
+        let line = root.interact(strip, id, Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeColumn);
+        let (tw, th) = if touch { (16.0, 64.0) } else { (8.0, 40.0) };
+        let tab = Rect::from_center_size(pos2(x, screen.center().y), vec2(tw, th));
+        let hit = tab.expand2(if touch { vec2(16.0, 20.0) } else { vec2(5.0, 8.0) });
+        let layer = egui::LayerId::new(egui::Order::Foreground, Id::new(("resize-tab", which)));
+        let tui = root.new_child(egui::UiBuilder::new().max_rect(hit).layer_id(layer).id_salt(("resize-tab", which)));
+        let grip = tui.interact(hit, id.with("tab"), Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeColumn);
+        let held = line.is_pointer_button_down_on() || grip.is_pointer_button_down_on();
+        let active = held || line.hovered() || grip.hovered();
+        let a = ctx.animate_bool_with_time(id.with("h"), active, 0.15);
         // .pane-resize::after: 2px line that turns accent on hover (with a .15s fade)
-        let a = root.ctx().animate_bool_with_time(id.with("h"), active, 0.15);
+        let fg = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("resize-line")));
         if a > 0.0 {
             fg.rect_filled(Rect::from_min_size(pos2(x - 1.0, screen.min.y), vec2(2.0, screen.height())), 0.0, theme::alpha(tk.accent, a));
         }
-        Some((resp, active))
+        // the tab: a pill with a grip
+        let p = ctx.layer_painter(layer);
+        p.rect(tab, cr(tw / 2.0), theme::mix(tk.panel_solid, tk.accent_soft, a), Stroke::new(1.0, theme::mix(tk.line, tk.accent, a)), StrokeKind::Inside);
+        for i in -1..=1 {
+            let c = pos2(x, tab.center().y + i as f32 * if touch { 9.0 } else { 6.0 });
+            p.circle_filled(c, if touch { 2.0 } else { 1.3 }, theme::mix(tk.muted, tk.accent, a));
+        }
+        if line.double_clicked() || grip.double_clicked() {
+            ctx.data_mut(|d| d.remove::<f32>(id));
+            return (None, false, true);
+        }
+        let grab = ctx.data(|d| d.get_temp::<f32>(id));
+        let pos = ctx.input(|i| i.pointer.interact_pos());
+        match (held, grab, pos) {
+            (true, None, Some(p)) => {
+                ctx.data_mut(|d| d.insert_temp(id, p.x - x));
+                (Some(x), false, false)
+            }
+            (true, Some(off), Some(p)) => {
+                ctx.request_repaint();
+                (Some(p.x - off), false, false)
+            }
+            (false, Some(_), _) => {
+                ctx.data_mut(|d| d.remove::<f32>(id));
+                (None, true, false)
+            }
+            _ => (None, false, false),
+        }
     };
     if let Some(sr) = lay.sidebar {
-        if let Some((resp, _)) = handle("sidebar", sr.max.x) {
-            if resp.double_clicked() {
-                panes::set_sidebar_width(app, panes::SIDEBAR_DEFAULT, true);
-            } else if resp.dragged() {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    panes::set_sidebar_width(app, p.x - screen.min.x, false);
-                }
-            } else if resp.drag_stopped() {
-                let w = app.panes.sidebar_w;
-                panes::set_sidebar_width(app, w, true);
-            }
+        let (to, done, reset) = handle("sidebar", sr.max.x);
+        if reset {
+            panes::set_sidebar_width(app, panes::SIDEBAR_DEFAULT, true);
+        } else if let Some(x) = to {
+            panes::set_sidebar_width(app, x - screen.min.x, false);
+        } else if done {
+            let w = app.panes.sidebar_w;
+            panes::set_sidebar_width(app, w, true);
         }
     }
     if let (Some(vr), Some(_)) = (lay.viewer, lay.main) {
-        if let Some((resp, _)) = handle("viewer", vr.min.x) {
-            if resp.double_clicked() {
-                panes::set_viewer_width(app, panes::VIEWER_DEFAULT, true, screen.width());
-            } else if resp.dragged() {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    panes::set_viewer_width(app, screen.max.x - p.x, false, screen.width());
-                }
-            } else if resp.drag_stopped() {
-                let w = app.panes.viewer_w;
-                panes::set_viewer_width(app, w, true, screen.width());
-            }
+        let (to, done, reset) = handle("viewer", vr.min.x);
+        if reset {
+            panes::set_viewer_width(app, panes::VIEWER_DEFAULT, true, screen.width());
+        } else if let Some(x) = to {
+            panes::set_viewer_width(app, screen.max.x - x, false, screen.width());
+        } else if done {
+            let w = app.panes.viewer_w;
+            panes::set_viewer_width(app, w, true, screen.width());
         }
     }
 }

@@ -95,6 +95,7 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), Need> {
             ui.allocate_ui_with_layout(vec2(chips_w, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| crate::setup::theme_picker_pub(app, ui));
         });
     });
+    touch_section(app, ui);
     crate::setup::permissions_section(app, ui);
     crate::checkpoints::settings_section(app, ui);
     w::h2(ui, "Keyboard shortcuts");
@@ -119,4 +120,47 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), Need> {
     }
     crate::vines::settings(app, ui);
     Ok(())
+}
+
+/// Touch: the on-screen reading buttons (CheckpointReader's touch mode).
+fn touch_section(app: &mut App, ui: &mut Ui) {
+    let tk = t();
+    w::h2(ui, "Touch");
+    let touch = match app.prefs.str("touch").as_str() {
+        "on" => "on",
+        "off" => "off",
+        _ => "auto",
+    };
+    let side = if app.prefs.str("readControls") == "left" { "left" } else { "right" };
+    let chips_w = |ui: &Ui, labels: &[&str]| 4.0 * labels.len() as f32 + labels.iter().map(|l| lay(ui, l, Ts::new(12.0, 400, tk.muted), None, false).size().x + 24.0).sum::<f32>();
+    let mut set: Option<(&str, &str)> = None;
+    crate::setup::panel_rows(ui, |ui| {
+        let hint = if app.touch_seen || touch == "on" { "Big ↑ / ↓ buttons step through a PDF's sentences and ＋ adds a checkpoint after one, while adding checkpoints. Auto turns them on once you touch the screen." } else { "Big ↑ / ↓ buttons step through a PDF's sentences and ＋ adds a checkpoint after one, while adding checkpoints. Auto turns them on once you touch the screen (not yet, this time)." };
+        crate::setup::perm_row(ui, &[("Touch device", true)], hint, |ui| {
+            let w_ = chips_w(ui, &["Auto", "On", "Off"]);
+            ui.allocate_ui_with_layout(vec2(w_, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (v, l) in [("auto", "Auto"), ("on", "On"), ("off", "Off")] {
+                    if w::chip(ui, l, touch == v).clicked() {
+                        set = Some(("touch", v));
+                    }
+                }
+            });
+        });
+        w::hline(ui, ui.cursor().min.y, ui.min_rect().min.x, ui.min_rect().max.x, tk.line);
+        crate::setup::perm_row(ui, &[("Buttons on the", true)], "Which side of the viewer the reading buttons sit on.", |ui| {
+            let w_ = chips_w(ui, &["Left", "Right"]);
+            ui.allocate_ui_with_layout(vec2(w_, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (v, l) in [("left", "Left"), ("right", "Right")] {
+                    if w::chip(ui, l, side == v).clicked() {
+                        set = Some(("readControls", v));
+                    }
+                }
+            });
+        });
+    });
+    if let Some((k, v)) = set {
+        app.set_pref(k, serde_json::json!(v));
+    }
 }

@@ -145,6 +145,11 @@ pub struct App {
     pub screenshot: Option<crate::Screenshot>,
     pub frame_no: u64,
     pub modal_focus: bool,
+    /// a finger has touched the screen this session (touch mode "auto" turns on)
+    pub touch_seen: bool,
+    /// the last pointer input was a finger (not a mouse): a drag on a PDF page then scrolls it.
+    /// Kept between frames because egui hands out a drag by what widgets sensed the frame before.
+    pub finger: bool,
     pub now: f64,
 }
 
@@ -226,6 +231,8 @@ impl App {
             screenshot,
             frame_no: 0,
             modal_focus: false,
+            touch_seen: false,
+            finger: false,
             now: 0.0,
             prefs,
         };
@@ -300,6 +307,15 @@ impl App {
         CTX.get().cloned()
     }
 
+    /// Touch mode: big on-screen reading buttons. "auto" (the default) once a finger is seen.
+    pub fn touch_mode(&self) -> bool {
+        match self.prefs.str("touch").as_str() {
+            "on" => true,
+            "off" => false,
+            _ => self.touch_seen,
+        }
+    }
+
     pub fn demo(&self) -> bool {
         self.status["demo"].as_bool().unwrap_or(false)
     }
@@ -336,6 +352,16 @@ impl App {
             ctx.request_repaint();
         }
         crate::debug::note_input(self, ctx);
+        let (touched, moused) = ctx.input(|i| {
+            let touched = i.any_touches() || i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. }));
+            (touched, i.events.iter().any(|e| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. })))
+        });
+        if touched {
+            self.touch_seen = true;
+            self.finger = true;
+        } else if moused {
+            self.finger = false;
+        }
         if let Some(keys) = self.screenshot.as_mut().map(|s| std::mem::take(&mut s.keys)) {
             ctx.input_mut(|i| i.events.extend(keys));
         }
@@ -370,6 +396,13 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.frame(ui, frame);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(batch) = self.screenshot.as_mut().and_then(|s| s.frames.pop_front()) {
+            raw.events.extend(batch);
+            ctx.request_repaint();
+        }
     }
 
     fn on_exit(&mut self) {

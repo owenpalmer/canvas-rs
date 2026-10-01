@@ -139,7 +139,8 @@ textbook reads like a course PDF, opens where you left off, and is searchable. F
 bookmarks, **Contents** (`o`) opens a sidebar of its chapters and sections (and glossary, index…) to
 jump to, following where you are. **Fullscreen** (`F11`, `Esc` to leave) gives the PDF the whole
 screen. In a book with sections, a checkpoint's passage starts no earlier than the section it's in
-(a checkpoint in 10.1 asks about 10.1, not chapter 9), up to eight pages back.
+(a checkpoint in 10.1 asks about 10.1, not chapter 9), up to eight pages back. Give a textbook a course (the select on its row) and its checkpoint cards go to that course's
+Anki deck, when the course has one linked on the Anki page; otherwise to the checkpoints deck.
 
 **Course home.** A course whose Canvas home is a page has a **Home** tab, and opens there; a course
 whose home is its syllabus or assignments opens on those.

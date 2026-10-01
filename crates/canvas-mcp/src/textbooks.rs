@@ -100,14 +100,15 @@ pub fn remove(id: &str) -> Result<()> {
     save(&books)
 }
 
-/// Merge fields into a book: its page count, reading position, when it was last opened.
+/// Merge fields into a book: its page count, reading position, when it was last opened, and the
+/// course it's for (a course id; null for none), whose Anki deck its checkpoint cards go to.
 pub fn update(id: &str, patch: &Value) -> Result<()> {
     let _g = LOCK.lock().unwrap();
     let mut books = load();
     let Some(b) = books.iter_mut().find(|b| b["id"] == id) else { return Err(Error::NotFound("No such textbook".into())) };
     if let (Some(o), Some(p)) = (b.as_object_mut(), patch.as_object()) {
         for (k, v) in p {
-            if ["pages", "position", "opened", "title"].contains(&k.as_str()) {
+            if ["pages", "position", "opened", "title", "course"].contains(&k.as_str()) {
                 o.insert(k.clone(), v.clone());
             }
         }
@@ -184,6 +185,10 @@ mod tests {
         let got = get(b["id"].as_str().unwrap()).unwrap();
         assert_eq!(got["position"], 12.5);
         assert_eq!(got["path"], pdf.to_string_lossy().as_ref()); // not patchable
+        update(b["id"].as_str().unwrap(), &json!({"course": "101"})).unwrap();
+        assert_eq!(get(b["id"].as_str().unwrap()).unwrap()["course"], "101");
+        update(b["id"].as_str().unwrap(), &json!({"course": null})).unwrap();
+        assert!(get(b["id"].as_str().unwrap()).unwrap()["course"].is_null());
         let txt = dir.path().join("notes.pdf");
         std::fs::write(&txt, b"hello").unwrap();
         assert!(add(txt.to_str().unwrap()).is_err());

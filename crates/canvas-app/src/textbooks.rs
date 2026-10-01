@@ -88,6 +88,35 @@ fn remove(app: &mut App, id: String) {
     });
 }
 
+/// The textbook is for a course: its checkpoint cards go to that course's Anki deck (when it has
+/// one linked on the Anki page; else to the checkpoints deck).
+fn set_course(app: &mut App, id: String, course: Option<String>) {
+    if let Some(b) = app.books.list.as_mut().and_then(|l| l.iter_mut().find(|b| b["id"] == id.as_str())) {
+        b["course"] = json!(course);
+    }
+    let svc = app.svc.clone();
+    app.fire(async move {
+        let _ = tokio::task::spawn_blocking(move || svc.textbook_update(&id, &json!({"course": course}))).await;
+    });
+}
+
+/// (value, label) for the course select: none, your courses, then past ones.
+fn course_options(app: &App) -> Vec<(String, String)> {
+    let label = |c: &Value| c["course_code"].as_str().filter(|x| !x.is_empty()).or(c["name"].as_str()).unwrap_or("").to_string();
+    let mut opts = vec![(String::new(), "No course".to_string())];
+    if let Some(cs) = app.d.peek("courses") {
+        opts.extend(cs.as_array().into_iter().flatten().map(|c| (fmt::id(&c["id"]), label(c))));
+    }
+    if let Some(past) = app.d.peek("past_courses").filter(|p| p.as_array().map(|a| !a.is_empty()).unwrap_or(false)) {
+        opts.push((String::new(), "§Past courses".into()));
+        for c in past.as_array().into_iter().flatten() {
+            let term = c["term"]["name"].as_str().map(|t| format!(" ({t})")).unwrap_or_default();
+            opts.push((fmt::id(&c["id"]), format!("{}{term}", label(c))));
+        }
+    }
+    opts
+}
+
 /// "page 63 of 2,036" from a saved position.
 fn progress(b: &Value) -> Option<String> {
     let pos = b["position"].as_f64()?;
@@ -153,6 +182,8 @@ pub fn list_view(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), Need> {
         w::empty(ui, "No textbooks yet.");
     } else {
         let mut gone: Option<String> = None;
+        let mut course_pick: Option<(String, Option<String>)> = None;
+        let opts = course_options(app);
         list(ui, |ui| {
             for (i, b) in books.iter().enumerate() {
                 let id = fmt::s(&b["id"]);
@@ -175,9 +206,17 @@ pub fn list_view(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), Need> {
                     meta: Some(meta.join(" · ")),
                     meta_color: (!exists).then_some(tk.bad),
                     first: i == 0,
-                    counts: vec![(" ".repeat(10), egui::Color32::TRANSPARENT, 400, false)], // room for ×
+                    counts: vec![(" ".repeat(58), egui::Color32::TRANSPARENT, 400, false)], // room for the course and ×
                     ..Default::default()
                 });
+                // the course it's for: its checkpoint cards go to that course's Anki deck
+                let cur = fmt::s(&b["course"]);
+                let sw = 160.0;
+                let sr = Rect::from_center_size(pos2(resp.rect.max.x - 10.0 - 36.0 - 8.0 - sw / 2.0, resp.rect.center().y), vec2(sw, 32.0));
+                let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(sr).id_salt(("book-course", &id)));
+                if let Some(v) = w::select(&mut cui, Id::new(("book-course", &id)), &cur, &opts, sw, 13.0) {
+                    course_pick = Some((id.clone(), Some(v).filter(|v| !v.is_empty())));
+                }
                 if row_button(ui, resp.rect, Id::new(("book-remove", &id)), "×", "Remove from Textbooks (the file stays)") {
                     gone = Some(id);
                 }
@@ -185,6 +224,9 @@ pub fn list_view(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), Need> {
         });
         if let Some(id) = gone {
             remove(app, id);
+        }
+        if let Some((id, c)) = course_pick {
+            set_course(app, id, c);
         }
     }
     let sugg = app.books.suggestions.clone();
@@ -253,7 +295,8 @@ pub fn book_view(app: &mut App, ui: &mut Ui, pane: Pane, id: &str) -> Result<(),
         });
     }
     crate::pdf::reader_bar(app, ui, &fid, &title, &fmt::fmt_size(&b["size"]), None);
-    crate::pdf::view(app, ui, pane, &fid, &title, None);
+    let course = b["course"].as_str().map(String::from);
+    crate::pdf::view(app, ui, pane, &fid, &title, course.as_deref());
     save_place(app, id, &fid, &b);
     Ok(())
 }

@@ -98,26 +98,45 @@ pub fn find_profile() -> Result<PathBuf> {
     if let Some(p) = config::settings().firefox_profile {
         return Ok(config::expand_user(&p));
     }
-    for root in firefox_roots() {
-        let Ok(text) = std::fs::read_to_string(root.join("profiles.ini")) else { continue };
-        let ini = parse_ini(&text);
-        // [Install*] Default= is the profile Firefox actually opens; fall back to Default=1.
-        for (name, sec) in &ini {
-            if name.starts_with("Install") {
-                if let Some(d) = sec.get("default").filter(|d| !d.is_empty()) {
-                    return Ok(root.join(d));
-                }
-            }
-        }
-        for (_, sec) in &ini {
-            if sec.get("default").map(|d| d == "1").unwrap_or(false) {
-                if let Some(p) = sec.get("path").filter(|p| !p.is_empty()) {
-                    return Ok(root.join(p));
-                }
+    // Each Firefox install (regular, snap, flatpak) has its default profile; a machine can have
+    // several, e.g. an old ~/.mozilla left behind after switching to the snap. The one in use is
+    // the one whose cookies were written last.
+    let found: Vec<PathBuf> = firefox_roots().iter().filter_map(|r| default_profile(r)).collect();
+    found
+        .into_iter()
+        .max_by_key(|p| cookies_written(p))
+        .ok_or_else(|| Error::Io(format!("No Firefox profile found; set firefox_profile in {}", config::config_path().display())))
+}
+
+/// A Firefox install's default profile, from its profiles.ini.
+fn default_profile(root: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(root.join("profiles.ini")).ok()?;
+    let ini = parse_ini(&text);
+    // [Install*] Default= is the profile Firefox actually opens; fall back to Default=1.
+    for (name, sec) in &ini {
+        if name.starts_with("Install") {
+            if let Some(d) = sec.get("default").filter(|d| !d.is_empty()) {
+                return Some(root.join(d));
             }
         }
     }
-    Err(Error::Io(format!("No Firefox profile found; set firefox_profile in {}", config::config_path().display())))
+    for (_, sec) in &ini {
+        if sec.get("default").map(|d| d == "1").unwrap_or(false) {
+            if let Some(p) = sec.get("path").filter(|p| !p.is_empty()) {
+                return Some(root.join(p));
+            }
+        }
+    }
+    None
+}
+
+/// When a profile's cookies were last written (cookies.sqlite or its write-ahead log).
+fn cookies_written(profile: &Path) -> std::time::SystemTime {
+    ["cookies.sqlite", "cookies.sqlite-wal"]
+        .iter()
+        .filter_map(|f| std::fs::metadata(profile.join(f)).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 // Firefox's "Open previous windows and tabs" (Settings → General → Startup) maps to the pref
@@ -298,6 +317,22 @@ pub fn cookie_header(cookies: &BTreeMap<String, String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn picks_the_profile_in_use() {
+        // two installs' profiles: the one whose cookies were written last is the one in use
+        let dir = tempfile::tempdir().unwrap();
+        let (old, live) = (dir.path().join("old"), dir.path().join("live"));
+        for p in [&old, &live] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(old.join("cookies.sqlite"), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(live.join("cookies.sqlite-wal"), b"x").unwrap();
+        let best = [old.clone(), live.clone()].into_iter().max_by_key(|p| cookies_written(p)).unwrap();
+        assert_eq!(best, live);
+        assert_eq!(cookies_written(&dir.path().join("none")), std::time::UNIX_EPOCH);
+    }
+
     use super::*;
 
     #[test]

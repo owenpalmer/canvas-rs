@@ -83,7 +83,7 @@ pub fn guess_type(filename: &str) -> &'static str {
 impl Anki {
     pub fn new(engine: Arc<Engine>) -> Arc<Anki> {
         engine.store.exec("CREATE TABLE IF NOT EXISTS anki_decks (course_id INTEGER PRIMARY KEY, deck_id INTEGER, deck_name TEXT)", &[]);
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().expect("http client");
+        let http = reqwest::Client::builder().user_agent(crate::util::USER_AGENT).timeout(Duration::from_secs(10)).build().expect("http client");
         Arc::new(Anki { engine, http })
     }
 

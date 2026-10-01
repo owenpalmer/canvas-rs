@@ -196,7 +196,7 @@ pub fn set_port(p: u16, folder: Option<&Path>) -> Result<()> {
 pub async fn install_ankiconnect() -> Result<()> {
     let version = anki_version();
     let url = format!("https://ankiweb.net/shared/download/{ANKICONNECT_ID}?v=2.1&p={}", point_version(version.as_deref()));
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().map_err(|e| Error::Fetch(e.to_string()))?;
+    let http = reqwest::Client::builder().user_agent(crate::util::USER_AGENT).timeout(Duration::from_secs(60)).build().map_err(|e| Error::Fetch(e.to_string()))?;
     let resp = http.get(&url).send().await?;
     if !resp.status().is_success() {
         return Err(crate::client::status_error(resp.status(), &url));

@@ -137,7 +137,7 @@ pub fn key_info() -> Value {
 }
 
 fn http() -> reqwest::Client {
-    reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().expect("http client")
+    reqwest::Client::builder().user_agent(crate::util::USER_AGENT).connect_timeout(Duration::from_secs(15)).build().expect("http client")
 }
 
 fn auth(req: reqwest::RequestBuilder, key: &str, bearer: bool) -> reqwest::RequestBuilder {

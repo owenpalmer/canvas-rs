@@ -77,7 +77,7 @@ impl App {
                     },
                     Src::Anki(name) => svc.anki_media(name).await.ok().flatten().map(|(b, _)| b),
                     Src::Mem(_) => None,
-                    Src::Web(u) => match reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build() {
+                    Src::Web(u) => match reqwest::Client::builder().user_agent(canvas_mcp::util::USER_AGENT).timeout(std::time::Duration::from_secs(30)).build() {
                         Ok(c) => match c.get(u).send().await {
                             Ok(r) if r.status().is_success() => r.bytes().await.ok().map(|b| b.to_vec()),
                             _ => None,

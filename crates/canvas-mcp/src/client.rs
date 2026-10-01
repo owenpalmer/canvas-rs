@@ -125,6 +125,7 @@ impl CanvasClient {
             headers.insert(COOKIE, v);
         }
         let http = reqwest::Client::builder()
+            .user_agent(crate::util::USER_AGENT)
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
@@ -217,7 +218,7 @@ impl CanvasClient {
             return Err(Error::Fetch("Too many redirects".into()));
         }
         // Signed storage URL: don't send Canvas cookies to a third-party host.
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| Error::Fetch(e.to_string()))?;
+        let http = reqwest::Client::builder().user_agent(crate::util::USER_AGENT).timeout(Duration::from_secs(120)).build().map_err(|e| Error::Fetch(e.to_string()))?;
         let resp = http.get(&next).send().await?;
         if !resp.status().is_success() {
             return Err(status_error(resp.status(), &next));

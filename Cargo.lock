@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "bytemuck",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "chrono",

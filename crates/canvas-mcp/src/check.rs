@@ -137,7 +137,10 @@ pub async fn check_main(args: &[String]) -> i32 {
         return 1;
     }
     let csrf = cookies.get("_csrf_token").map(|t| percent_encoding::percent_decode_str(t).decode_utf8_lossy().into_owned()).unwrap_or_default();
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
+        .build()
+        .expect("http client")
         .get(format!("{}/api/v1/users/self", config::canvas_url()))
         .header("Accept", "application/json")
         .header("X-CSRF-Token", csrf)

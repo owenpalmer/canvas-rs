@@ -2,6 +2,10 @@
 
 use serde_json::Value;
 
+/// Sent with every request: Canvas (and its CDN) turns away requests without a User-Agent with
+/// 403 Forbidden, before looking at the session.
+pub const USER_AGENT: &str = concat!("canvas-rs/", env!("CARGO_PKG_VERSION"));
+
 /// Python's truthiness.
 pub fn truthy(v: &Value) -> bool {
     match v {

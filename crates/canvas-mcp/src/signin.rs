@@ -69,7 +69,7 @@ pub async fn probe(url: &str, http: &reqwest::Client) -> Option<String> {
 }
 
 pub async fn find_canvas(text: &str) -> Option<String> {
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(8)).build().ok()?;
+    let http = reqwest::Client::builder().user_agent(crate::util::USER_AGENT).timeout(Duration::from_secs(8)).build().ok()?;
     for url in candidates(text) {
         if let Some(found) = probe(&url, &http).await {
             return Some(found);

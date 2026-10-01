@@ -18,7 +18,7 @@ pub fn ttl(name: &str) -> Option<f64> {
     Some(match name {
         "self" => 24.0 * 60.0 * MIN,
         "colors" => 60.0 * MIN,
-        "courses" => 30.0 * MIN,
+        "courses" => 5.0 * MIN, // every sync, so newly published courses show up
         "past_courses" => 24.0 * 60.0 * MIN,
         "planner" | "announcements" | "course_announcements" | "groups" | "submission" | "modules" | "pages" | "discussions" | "topic" => 5.0 * MIN,
         "inbox" | "conversation" => 3.0 * MIN,

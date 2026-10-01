@@ -35,6 +35,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: &Route, pane: Pane) -> Result<(), Nee
         View::Files(c) => course::files(app, ui, pane, c),
         View::File(c, f) => detail::file(app, ui, pane, c.as_deref(), f),
         View::Syllabus(c) => course::syllabus(app, ui, pane, c),
+        View::Home(c) => course::home(app, ui, pane, c),
         View::Recording(c, r) => crate::search::recording_view(app, ui, pane, c, r),
         View::Welcome => crate::setup::welcome(app, ui, pane),
         View::Settings => crate::settings::view(app, ui, pane),
@@ -45,6 +46,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: &Route, pane: Pane) -> Result<(), Nee
         View::Anki => crate::anki::decks_view(app, ui, pane),
         View::AnkiImport => crate::anki::import_view(app, ui, pane),
         View::AnkiDeck(d) => crate::anki::review_view(app, ui, pane, *d),
+        View::Textbooks => crate::textbooks::list_view(app, ui, pane),
+        View::Textbook(id) => crate::textbooks::book_view(app, ui, pane, id),
         View::NotFound => {
             out(app, pane).title = "Not found".into();
             h1(ui, pane, "Not found");
@@ -405,7 +408,8 @@ pub fn group_head(ui: &mut Ui, left: &str, right: impl FnOnce(&mut Ui)) -> Rect 
 }
 
 /// A course's tabs (.tabs): the sections Canvas shows for it.
-pub const COURSE_TABS: [(&str, &str, &str); 8] = [
+pub const COURSE_TABS: [(&str, &str, &str); 9] = [
+    ("home", "Home", "home"),
     ("modules", "Modules", "modules"),
     ("assignments", "Assignments", "assignments"),
     ("grades", "Grades", "grades"),
@@ -415,6 +419,24 @@ pub const COURSE_TABS: [(&str, &str, &str); 8] = [
     ("files", "Files", "files"),
     ("syllabus", "Syllabus", "syllabus"),
 ];
+
+/// Whether a course's home is a page (Canvas's "Pages Front Page" home), so it has a Home tab.
+pub fn has_home(app: &App, cid: &str, c: &Value) -> bool {
+    c["default_view"] == "wiki" || app.d.peek(&crate::data::key_of("pages", &[cid.to_string()])).map(|p| p.as_array().map(|a| a.iter().any(|x| x["front_page"] == true)).unwrap_or(false)).unwrap_or(false)
+}
+
+/// Where a course opens: where Canvas opens it (its home page, syllabus or assignments), else
+/// Modules.
+pub fn course_href(app: &App, cid: &str) -> String {
+    let c = ["courses", "past_courses"].iter().filter_map(|k| app.d.peek(k)).find_map(|l| l.as_array().and_then(|a| a.iter().find(|x| fmt::id(&x["id"]) == cid).cloned()));
+    let tab = match c.as_ref().and_then(|c| c["default_view"].as_str()) {
+        Some("wiki") => "home",
+        Some("syllabus") => "syllabus",
+        Some("assignments") => "assignments",
+        _ => "modules",
+    };
+    format!("#/c/{cid}/{tab}")
+}
 
 /// The course's header (crumbs, title, New notebook) and section tabs; the body goes below.
 pub fn course_shell(app: &mut App, ui: &mut Ui, pane: Pane, cid: &str, active: &str, info: &canvas::CourseInfo, tabs: Option<&Value>) {
@@ -439,7 +461,12 @@ pub fn course_shell(app: &mut App, ui: &mut Ui, pane: Pane, cid: &str, active: &
     ui.allocate_space(vec2(wdt, h));
     // tabs: shown if Canvas shows them (Grades always, and the one you're on)
     let visible: Option<Vec<String>> = tabs.and_then(|t| t.as_array()).map(|a| a.iter().filter(|x| !x["hidden"].as_bool().unwrap_or(false)).map(|x| fmt::s(&x["id"])).collect());
-    let shown: Vec<&(&str, &str, &str)> = COURSE_TABS.iter().filter(|(slug, _, id)| visible.as_ref().map(|v| v.iter().any(|x| x == id)).unwrap_or(true) || *id == "grades" || *slug == active).collect();
+    // Home: only for a course whose home is a page (every course has Canvas's "home" tab)
+    let home = has_home(app, cid, c);
+    let shown: Vec<&(&str, &str, &str)> = COURSE_TABS
+        .iter()
+        .filter(|(slug, _, id)| if *slug == "home" { home || active == "home" } else { visible.as_ref().map(|v| v.iter().any(|x| x == id)).unwrap_or(true) || *id == "grades" || *slug == active })
+        .collect();
     ui.add_space(14.0);
     let (bar, _) = ui.allocate_exact_size(vec2(wdt, 36.0), Sense::hover());
     ui.painter().hline(bar.x_range(), bar.max.y - 0.5, Stroke::new(1.0, tk.line));

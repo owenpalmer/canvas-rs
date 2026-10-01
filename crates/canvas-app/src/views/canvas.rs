@@ -198,7 +198,7 @@ fn cards(app: &mut App, ui: &mut Ui, pane: Pane, courses: &[Value], colors: &Jso
             let cid = fmt::id(&c["id"]);
             let color = color_for(&cid, Some(colors));
             let r = Rect::from_min_size(pos2(row_rect.min.x + i as f32 * (col_w + 12.0), row_rect.min.y), vec2(col_w, row_h));
-            let href = format!("#/c/{cid}/modules");
+            let href = crate::views::course_href(app, &cid);
             let resp = ui.interact(r, Id::new(("card", &cid)), Sense::click());
             let key = format!("card:{cid}");
             let cursor = crate::panes::state(app, pane).cursor.as_deref() == Some(key.as_str()) && app.panes.focused == pane;

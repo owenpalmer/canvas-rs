@@ -66,7 +66,7 @@ pub static FIX: Lazy<Fixtures> = Lazy::new(|| {
     let courses = json!([
         {"id": 101, "name": "Data Structures and Algorithms", "course_code": "CSE 373", "is_favorite": true,
          "enrollments": [{"type": "student", "computed_current_score": 91.4, "computed_current_grade": "A-"}], "term": {"name": "Autumn 2026"}},
-        {"id": 102, "name": "Introduction to Linear Algebra", "course_code": "MATH 208", "is_favorite": true,
+        {"id": 102, "name": "Introduction to Linear Algebra", "course_code": "MATH 208", "is_favorite": true, "default_view": "wiki",
          "enrollments": [{"type": "student", "computed_current_score": 84.25, "computed_current_grade": null}], "term": {"name": "Autumn 2026"}},
         {"id": 103, "name": "Writing in the Sciences", "course_code": "ENGL 298", "is_favorite": false,
          "enrollments": [{"type": "student", "computed_current_score": null}], "term": {"name": "Autumn 2026"}},
@@ -275,6 +275,7 @@ static ROUTES: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (r"courses/(\d+)/modules", "modules"),
         (r"courses/(\d+)/pages", "pages"),
         (r"courses/(\d+)/pages/(.+)", "page"),
+        (r"courses/(\d+)/front_page", "front_page"),
         (r"courses/(\d+)/files", "files"),
         (r"courses/(\d+)/folders", "folders"),
         (r"files/(\d+)", "file"),
@@ -358,6 +359,7 @@ impl DemoClient {
                 "modules" => f.modules.get(g(1)).cloned().unwrap_or(json!([])),
                 "pages" => Value::Array(f.pages.get(g(1)).and_then(|v| v.as_array()).into_iter().flatten().map(|p| strip(p, "body")).collect()),
                 "page" => f.pages.get(g(1)).and_then(|v| v.as_array()).into_iter().flatten().find(|x| x["url"] == g(2)).cloned().ok_or_else(no)?,
+                "front_page" => f.pages.get(g(1)).and_then(|v| v.as_array()).into_iter().flatten().find(|x| x["front_page"] == true).cloned().ok_or_else(no)?,
                 "files" => f.files.get(g(1)).map(|v| v["files"].clone()).unwrap_or(json!([])),
                 "folders" => f.files.get(g(1)).map(|v| v["folders"].clone()).unwrap_or(json!([])),
                 "file" => {

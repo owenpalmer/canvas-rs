@@ -295,6 +295,11 @@ impl Engine {
             for r in futures::future::join_all(jobs.iter().map(|(n, cid)| self.fresh(n, std::slice::from_ref(cid)))).await {
                 r?;
             }
+            // Courses whose home is a page: that page.
+            let homes: Vec<String> = courses.iter().filter(|c| c["default_view"] == "wiki").map(|c| c["id"].to_string()).collect();
+            for r in futures::future::join_all(homes.iter().map(|cid| self.fresh("front_page", std::slice::from_ref(cid)))).await {
+                r?;
+            }
             // Deep: page bodies whose list entry changed since we cached them.
             let mut deep = Vec::new();
             for cid in &ids {

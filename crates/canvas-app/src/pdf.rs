@@ -61,6 +61,7 @@ pub struct Link {
 pub struct Info {
     pub pages: Vec<(f32, f32)>,
     pub fingerprint: String,
+    pub outline: Arc<Vec<OutlineItem>>,
 }
 
 enum Job {
@@ -69,8 +70,8 @@ enum Job {
     Text { fid: String, page: usize },
     Links { fid: String, page: usize },
     Close { fid: String },
-    /// every page's text of a PDF on disk (for the search index)
-    Extract { path: PathBuf, reply: Box<dyn FnOnce(Option<Vec<String>>) + Send> },
+    /// every page's text of a PDF on disk (for the search index), a few pages per turn
+    Extract { path: PathBuf, from: usize, acc: Vec<String>, reply: Box<dyn FnOnce(Option<Vec<String>>) + Send> },
 }
 
 /// The PDF's fingerprint as pdf.js computes it: the file's /ID, else an MD5 of its first 1KB.
@@ -176,6 +177,59 @@ fn page_text(page: &PdfPage) -> PageText {
     PageText { chars, items, w: pw, h: ph }
 }
 
+/// Where a destination points: (page index, fraction of the page's height from the top).
+fn dest_pos(doc: &PdfDocument, d: &PdfDestination) -> Option<(usize, f32)> {
+    let idx = d.page_index().ok()? as usize;
+    let h = doc.pages().get(idx as PdfPageIndex).map(|p| p.height().value).ok()?;
+    let top = match d.view_settings().ok()? {
+        PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _) => y.map(|y| y.value),
+        PdfDestinationViewSettings::FitPageHorizontallyToWindow(y) | PdfDestinationViewSettings::FitBoundsHorizontallyToWindow(y) => y.map(|y| y.value),
+        PdfDestinationViewSettings::FitPageToRectangle(r) => Some(r.top().value),
+        _ => None,
+    };
+    Some((idx, top.map(|y| (1.0 - y / h).clamp(0.0, 1.0)).unwrap_or(0.0)))
+}
+
+/// An entry in a PDF's outline (its bookmarks: chapters, sections, the glossary…), in document
+/// order; an entry's children are the entries after it that are deeper.
+#[derive(Clone, Debug)]
+pub struct OutlineItem {
+    pub title: String,
+    pub depth: usize,
+    pub page: usize,
+    pub y: f32,
+}
+
+/// The whole outline, flattened in reading order (entries without a destination are kept, at the
+/// place of their first child, so the tree stays whole).
+fn outline(doc: &PdfDocument) -> Vec<OutlineItem> {
+    fn walk(doc: &PdfDocument, first: Option<PdfBookmark>, depth: usize, out: &mut Vec<OutlineItem>, budget: &mut usize) {
+        let mut cur = first;
+        while let Some(b) = cur {
+            if *budget == 0 || depth > 12 {
+                return;
+            }
+            *budget -= 1;
+            let pos = b.destination().and_then(|d| dest_pos(doc, &d)).or_else(|| b.action().and_then(|a| a.as_local_destination_action().and_then(|d| d.destination().ok().and_then(|d| dest_pos(doc, &d)))));
+            let title = b.title().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+            let at = out.len();
+            out.push(OutlineItem { title, depth, page: pos.map(|p| p.0).unwrap_or(usize::MAX), y: pos.map(|p| p.1).unwrap_or(0.0) });
+            walk(doc, b.first_child(), depth + 1, out, budget);
+            // no destination of its own: where its first child is
+            if out[at].page == usize::MAX {
+                let (page, y) = out.get(at + 1).filter(|c| c.depth > depth && c.page != usize::MAX).map(|c| (c.page, c.y)).unwrap_or((0, 0.0));
+                out[at].page = page;
+                out[at].y = y;
+            }
+            cur = b.next_sibling();
+        }
+    }
+    let mut out = Vec::new();
+    let mut budget = 5000;
+    walk(doc, doc.bookmarks().root(), 0, &mut out, &mut budget);
+    out
+}
+
 fn page_links(doc: &PdfDocument, page: &PdfPage) -> Vec<Link> {
     let (pw, ph) = (page.width().value, page.height().value);
     let mut out = Vec::new();
@@ -183,17 +237,7 @@ fn page_links(doc: &PdfDocument, page: &PdfPage) -> Vec<Link> {
         let Ok(r) = l.rect() else { continue };
         let rect = [r.left().value / pw, 1.0 - r.top().value / ph, r.right().value / pw, 1.0 - r.bottom().value / ph];
         let url = l.action().and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok())).filter(|u| u.starts_with("http://") || u.starts_with("https://"));
-        let dest_of = |d: PdfDestination| -> Option<(usize, f32)> {
-            let idx = d.page_index().ok()? as usize;
-            let h = doc.pages().get(idx as PdfPageIndex).map(|p| p.height().value).unwrap_or(ph);
-            let top = match d.view_settings().ok()? {
-                PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _) => y.map(|y| y.value),
-                PdfDestinationViewSettings::FitPageHorizontallyToWindow(y) | PdfDestinationViewSettings::FitBoundsHorizontallyToWindow(y) => y.map(|y| y.value),
-                PdfDestinationViewSettings::FitPageToRectangle(r) => Some(r.top().value),
-                _ => None,
-            };
-            Some((idx, top.map(|y| (1.0 - y / h).clamp(0.0, 1.0)).unwrap_or(0.0)))
-        };
+        let dest_of = |d: PdfDestination| dest_pos(doc, &d);
         let dest = l.destination().and_then(dest_of).or_else(|| l.action().and_then(|a| a.as_local_destination_action().and_then(|d| d.destination().ok().and_then(dest_of))));
         if url.is_some() || dest.is_some() {
             out.push(Link { rect, url, dest });
@@ -202,7 +246,10 @@ fn page_links(doc: &PdfDocument, page: &PdfPage) -> Vec<Link> {
     out
 }
 
-fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
+/// Pages of text extracted per turn of the worker.
+const EXTRACT_CHUNK: usize = 25;
+
+fn worker(rx: Receiver<Job>, tx: Sender<Msg>, me: Sender<Job>) {
     let pdfium = match library() {
         Ok(p) => Box::leak(Box::new(p)),
         Err(e) => {
@@ -222,6 +269,7 @@ fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
         }
     };
     let mut docs: HashMap<String, PdfDocument<'static>> = HashMap::new();
+    let mut extracting: HashMap<PathBuf, PdfDocument<'static>> = HashMap::new();
     let send = |f: Box<dyn FnOnce(&mut App) + Send>| {
         let _ = tx.send(Msg::Apply(f));
         crate::app::wake();
@@ -233,8 +281,9 @@ fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
                     let fp = fingerprint(&bytes);
                     let doc = pdfium.load_pdf_from_byte_vec(bytes, None).map_err(|e| format!("{e}"))?;
                     let pages: Vec<(f32, f32)> = doc.pages().iter().map(|p| (p.width().value, p.height().value)).collect();
+                    let outline = Arc::new(outline(&doc));
                     docs.insert(fid.clone(), doc);
-                    Ok(Info { pages, fingerprint: fp })
+                    Ok(Info { pages, fingerprint: fp, outline })
                 });
                 send(Box::new(move |app: &mut App| app.pdf.opened(&fid, res)));
             }
@@ -267,9 +316,31 @@ fn worker(rx: Receiver<Job>, tx: Sender<Msg>) {
             Job::Close { fid } => {
                 docs.remove(&fid);
             }
-            Job::Extract { path, reply } => {
-                let pages = pdfium.load_pdf_from_file(&path, None).ok().map(|doc| doc.pages().iter().map(|p| p.text().map(|t| t.all()).unwrap_or_default()).collect());
-                reply(pages);
+            Job::Extract { path, from, mut acc, reply } => {
+                if !extracting.contains_key(&path) {
+                    match pdfium.load_pdf_from_file(&path, None) {
+                        Ok(d) => {
+                            extracting.insert(path.clone(), d);
+                        }
+                        Err(_) => {
+                            reply(None);
+                            continue;
+                        }
+                    }
+                }
+                let doc = &extracting[&path];
+                let n = doc.pages().len() as usize;
+                let to = (from + EXTRACT_CHUNK).min(n);
+                for i in from..to {
+                    acc.push(doc.pages().get(i as PdfPageIndex).ok().and_then(|p| p.text().ok().map(|t| t.all())).unwrap_or_default());
+                }
+                if to >= n {
+                    extracting.remove(&path);
+                    reply(Some(acc));
+                } else {
+                    // to the back of the queue: pages being read get drawn in between
+                    let _ = me.send(Job::Extract { path, from: to, acc, reply });
+                }
             }
         }
     }
@@ -310,20 +381,28 @@ pub struct Pdfs {
     order: Vec<String>,
     pub sel: Option<Sel>,
     pub scroll_to: Option<(String, usize, f32, bool)>,
+    /// the Contents panel is open (for PDFs that have an outline)
+    pub contents: bool,
+    /// per PDF: the outline entries opened in the Contents panel
+    pub expanded: HashMap<String, std::collections::HashSet<usize>>,
+    /// per PDF: a place to go back to once it's drawn (a textbook's last position)
+    pub restore: HashMap<String, (usize, f32)>,
+    /// fullscreen: pages no wider than this, centered
+    pub max_w: Option<f32>,
 }
 
 const KEEP: usize = 4;
 
 impl Pdfs {
     pub fn new() -> Pdfs {
-        Pdfs { tx: None, docs: HashMap::new(), order: Vec::new(), sel: None, scroll_to: None }
+        Pdfs { tx: None, docs: HashMap::new(), order: Vec::new(), sel: None, scroll_to: None, contents: false, expanded: HashMap::new(), restore: HashMap::new(), max_w: None }
     }
 
     fn send(&mut self, app_tx: &Sender<Msg>, job: Job) {
         if self.tx.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
-            let atx = app_tx.clone();
-            std::thread::Builder::new().name("pdfium".into()).spawn(move || worker(rx, atx)).ok();
+            let (atx, me) = (app_tx.clone(), tx.clone());
+            std::thread::Builder::new().name("pdfium".into()).spawn(move || worker(rx, atx, me)).ok();
             self.tx = Some(tx);
         }
         if let Some(t) = &self.tx {
@@ -357,7 +436,7 @@ impl Pdfs {
 
     /// Extract every page's text from a PDF file (in the worker, between drawing jobs).
     pub fn extract(&mut self, app_tx: &Sender<Msg>, path: PathBuf, reply: Box<dyn FnOnce(Option<Vec<String>>) + Send>) {
-        self.send(app_tx, Job::Extract { path, reply });
+        self.send(app_tx, Job::Extract { path, from: 0, acc: Vec::new(), reply });
     }
 
     /// Render a page at a width in pixels (white background), for checkpoints' pictures.
@@ -400,7 +479,12 @@ fn ensure(app: &mut App, fid: &str) {
         },
     );
     let (svc, f) = (app.svc.clone(), fid.to_string());
-    app.spawn(async move { svc.file(&f).await.map(|(p, _)| p) }, {
+    app.spawn(async move {
+        match f.strip_prefix("tb-") {
+            Some(id) => svc.textbook(id).map(|b| PathBuf::from(canvas_mcp::util::s(&b["path"]))).ok_or_else(|| canvas_mcp::services::ApiErr::new(404, "textbook", "This textbook isn't in your library any more")),
+            None => svc.file(&f).await.map(|(p, _)| p),
+        }
+    }, {
         let f = fid.to_string();
         move |app, r| match r {
             Ok(path) => {
@@ -508,8 +592,9 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
     // .pdf-view: margin 0 -16px, pages 8px apart
     // the pages span the viewer's visible width, whatever the bar above them did to the layout
     let vis = ui.clip_rect();
-    let width = vis.width();
-    let x0 = vis.min.x;
+    // in fullscreen, pages no wider than reading width, centered
+    let width = app.pdf.max_w.map(|m| vis.width().min(m)).unwrap_or(vis.width());
+    let x0 = vis.center().x - width / 2.0;
     let avail = (width - 32.0).max(1.0);
     let ppp = ctx.pixels_per_point();
     let width_px = (width * ppp.min(3.0)).round() as u32;
@@ -581,6 +666,13 @@ pub fn view(app: &mut App, ui: &mut Ui, pane: Pane, fid: &str, name: &str, cid: 
     if copy {
         if let Some(text) = selected_text(app).filter(|s| !s.is_empty()) {
             ctx.copy_text(text);
+        }
+    }
+    // a textbook opens where you left it
+    if let Some((page, y)) = app.pdf.restore.get(fid).copied() {
+        if content_y(app, fid, page, y).is_some() {
+            app.pdf.restore.remove(fid);
+            scroll_pdf_to(app, fid, page, y, READ_LINE);
         }
     }
     // a search hit in this PDF
@@ -709,6 +801,36 @@ fn slice_overlays(app: &mut App, ui: &mut Ui, fid: &str, key: &str, page: usize,
 
 #[cfg(test)]
 mod tests {
+    use pdfium_render::prelude::*;
+
+    /// OUTLINE_PDF=/path/book.pdf cargo test -p canvas-app outline_of -- --nocapture
+    #[test]
+    fn outline_of() {
+        let Ok(path) = std::env::var("OUTLINE_PDF") else { return };
+        let pdfium = super::library().unwrap();
+        let doc = pdfium.load_pdf_from_file(&path, None).unwrap();
+        let o = super::outline(&doc);
+        println!("{} pages, {} outline entries", doc.pages().len(), o.len());
+        for it in o.iter().take(80) {
+            println!("{}{} → p{} {:.2}", "  ".repeat(it.depth), it.title, it.page + 1, it.y);
+        }
+        // where the sections' headings are on their pages
+        for it in o.iter().filter(|i| i.depth == 1).take(12) {
+            let page = doc.pages().get(it.page as PdfPageIndex).unwrap();
+            let y = crate::checkpoints::find_heading(&super::page_text(&page), &it.title);
+            println!("heading {:40} p{} y={:?}", it.title, it.page + 1, y);
+        }
+        if let Ok(pages) = std::env::var("OUTLINE_PAGES") {
+            for p in pages.split(',').filter_map(|x| x.parse::<usize>().ok()) {
+                let t = super::page_text(&doc.pages().get((p - 1) as PdfPageIndex).unwrap());
+                println!("--- page {p}");
+                for it in t.items.iter().take(14) {
+                    println!("  y={:.3} h={:.4} {:?}", it.y, it.h, it.s.chars().take(70).collect::<String>());
+                }
+            }
+        }
+    }
+
     #[test]
     fn fingerprints() {
         let bytes = canvas_mcp::demo::pdf("T", 1);
@@ -716,5 +838,221 @@ mod tests {
         assert_eq!(fp.len(), 32);
         let with_id = b"%PDF-1.4\ntrailer\n<< /ID [<ABCDEF0123> <ABCDEF0123>] >>\n%%EOF".to_vec();
         assert_eq!(super::fingerprint(&with_id), "abcdef0123");
+    }
+}
+
+/// Where "where you're reading" is: this far below the top of the viewer (a sliver of the page
+/// before doesn't count).
+const READ_LINE: f32 = 40.0;
+
+/// Where the reader is: the page at the top of the viewer, plus how far down it (page index +
+/// fraction), from where the pages were drawn last frame.
+pub fn current_pos(app: &App, fid: &str) -> Option<f32> {
+    let d = app.pdf.docs.get(fid)?;
+    let y = app.viewer.scroll + READ_LINE;
+    let (page, (top, h)) = d.page_y.iter().filter(|(_, (top, _))| *top <= y).max_by(|a, b| a.1.0.total_cmp(&b.1.0))?;
+    Some(*page as f32 + ((y - top) / h.max(1.0)).clamp(0.0, 0.999))
+}
+
+/// The PDF behind a viewer address, when it's one that's open: a Canvas file or a textbook.
+pub fn fid_of(app: &App, href: &str) -> Option<String> {
+    let fid = match crate::route::parse(href).view {
+        crate::route::View::File(_, f) => f,
+        crate::route::View::Textbook(id) => format!("tb-{id}"),
+        _ => return None,
+    };
+    app.pdf.info(&fid).map(|_| fid)
+}
+
+// ---------- the reader's bar and its Contents panel ----------
+/// The PDF's one-row bar: its name (cut to fit) and size, then Contents (when it has an outline),
+/// Checkpoints, Fullscreen and, for a Canvas file, Canvas ↗.
+pub fn reader_bar(app: &mut App, ui: &mut Ui, fid: &str, name: &str, size: &str, canvas_url: Option<&str>) {
+    let tk = t();
+    let outline = app.pdf.info(fid).map(|i| !i.outline.is_empty()).unwrap_or(false);
+    let full = app.panes.fullscreen;
+    let cp_on = app.cp.mode;
+    let contents_on = app.pdf.contents;
+    let opts = |pressed| crate::widgets::ButtonOpts { size: 13.0, pad: vec2(11.0, 5.0), pressed, ..Default::default() };
+    let mut labels: Vec<&str> = vec!["Checkpoints", if full { "Exit fullscreen" } else { "Fullscreen" }];
+    if outline {
+        labels.push("Contents");
+    }
+    if canvas_url.is_some() {
+        labels.push("Canvas ↗");
+    }
+    let btn_w: f32 = labels.iter().map(|l| crate::widgets::lay(ui, l, Ts::new(13.0, 400, tk.text), None, false).size().x + 24.0 + 6.0).sum();
+    ui.add_space(-6.0);
+    let avail = ui.available_width();
+    let size_w = crate::widgets::lay(ui, size, Ts::faint(12.0), None, false).size().x;
+    // narrow: the name on its own line, the buttons under it
+    let two_rows = avail - btn_w - 20.0 < 200.0;
+    let title_w = if two_rows { avail } else { (avail - btn_w - size_w - 20.0).max(60.0) };
+    let (row, _) = ui.allocate_exact_size(vec2(avail, 34.0), Sense::hover());
+    let ts = Ts::new(14.0, 650, tk.text).sp(-0.01);
+    let g = crate::widgets::lay(ui, name, ts, Some(title_w), true);
+    let whole = crate::widgets::lay(ui, name, ts, None, false).size().x <= g.size().x + 1.0;
+    let gw = g.size().x;
+    let title_rect = Rect::from_min_size(pos2(row.min.x, row.center().y - g.size().y / 2.0), g.size());
+    ui.painter().galley(title_rect.min, g, tk.text);
+    ui.interact(title_rect, Id::new(("pdf-title", fid)), Sense::hover()).on_hover_text(name);
+    if whole && !size.is_empty() && gw + 8.0 + size_w <= avail {
+        let sg = crate::widgets::lay(ui, size, Ts::faint(12.0), None, false);
+        ui.painter().galley(pos2(row.min.x + gw + 8.0, row.center().y - sg.size().y / 2.0), sg, tk.faint);
+    }
+    let bar_rect = if two_rows {
+        let (r2, _) = ui.allocate_exact_size(vec2(avail, 38.0), Sense::hover());
+        r2
+    } else {
+        row
+    };
+    let layout = if two_rows { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) };
+    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(bar_rect).layout(layout));
+    bar.spacing_mut().item_spacing.x = 6.0;
+    let mut order = vec!["contents", "checkpoints", "fullscreen", "canvas"];
+    if !two_rows {
+        order.reverse(); // laid out from the right
+    }
+    for b in order {
+        match b {
+            "contents" if outline => {
+                if crate::widgets::button_ex(&mut bar, "Contents", opts(contents_on)).on_hover_text("Chapters and sections (O)").clicked() {
+                    set_contents(app, !contents_on);
+                }
+            }
+            "checkpoints" => {
+                if crate::widgets::button_ex(&mut bar, "Checkpoints", opts(cp_on)).on_hover_text("Checkpoint mode (M)").clicked() {
+                    crate::checkpoints::set_mode(app, !cp_on);
+                }
+            }
+            "fullscreen" => {
+                if crate::widgets::button_ex(&mut bar, if full { "Exit fullscreen" } else { "Fullscreen" }, opts(full)).on_hover_text("Fullscreen (F11)").clicked() {
+                    crate::panes::set_fullscreen(app, !full);
+                }
+            }
+            "canvas" => {
+                if let Some(u) = canvas_url {
+                    if crate::widgets::button_ex(&mut bar, "Canvas ↗", opts(false)).on_hover_text("Open in Canvas").clicked() {
+                        app.open_external(u);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ui.add_space(8.0);
+}
+
+pub fn set_contents(app: &mut App, on: bool) {
+    app.pdf.contents = on;
+    app.set_pref("pdfContents", serde_json::json!(on));
+}
+
+/// Which outline entry the reader is in: the last one starting at or before `pos`.
+pub fn section_at(outline: &[OutlineItem], pos: f32) -> Option<usize> {
+    outline.iter().enumerate().filter(|(_, it)| it.page as f32 + it.y <= pos + 0.002).map(|(i, _)| i).last()
+}
+
+/// The Contents panel: the outline as a tree (chapters open to their sections), the section
+/// you're in marked. Tapping a title goes there; the arrow opens or closes it.
+pub fn contents(app: &mut App, ui: &mut Ui, fid: &str) {
+    let tk = t();
+    let Some(info) = app.pdf.info(fid).cloned() else { return };
+    let items = info.outline.clone();
+    let pos = current_pos(app, fid).unwrap_or(0.0);
+    let cur = section_at(&items, pos);
+    // the chain of entries leading to the current one stays open
+    let mut ancestors = std::collections::HashSet::new();
+    if let Some(c) = cur {
+        let mut depth = items[c].depth;
+        for i in (0..c).rev() {
+            if items[i].depth < depth {
+                ancestors.insert(i);
+                depth = items[i].depth;
+            }
+        }
+    }
+    let expanded = app.pdf.expanded.entry(fid.to_string()).or_default().clone();
+    let has_kids = |i: usize| items.get(i + 1).map(|n| n.depth > items[i].depth).unwrap_or(false);
+    let is_open = |i: usize| expanded.contains(&i) || (ancestors.contains(&i) && !expanded.contains(&(usize::MAX - i)));
+    ui.add_space(8.0);
+    crate::widgets::text_line(ui, "   Contents", Ts::new(11.0, 600, tk.faint).up().sp(0.06));
+    ui.add_space(4.0);
+    let w = ui.available_width();
+    let mut toggle: Option<usize> = None;
+    let mut go: Option<usize> = None;
+    let mut hidden_below: Option<usize> = None; // inside a closed entry of this depth
+    for (i, it) in items.iter().enumerate() {
+        if let Some(d) = hidden_below {
+            if it.depth > d {
+                continue;
+            }
+            hidden_below = None;
+        }
+        let kids = has_kids(i);
+        let open = kids && is_open(i);
+        if kids && !open {
+            hidden_below = Some(it.depth);
+        }
+        let indent = 8.0 + it.depth as f32 * 16.0;
+        let tx_off = indent + 28.0;
+        let pg = format!("{}", it.page + 1);
+        let pgg = crate::widgets::lay(ui, &pg, Ts::faint(11.5), None, false);
+        let pw = pgg.size().x;
+        let here = Some(i) == cur;
+        let ts = Ts::new(13.5, if it.depth == 0 { 600 } else { 400 }, if here { tk.accent } else { tk.text });
+        // titles wrap onto a second line (then end in …)
+        let mut job = egui::text::LayoutJob::single_section(it.title.clone(), ts.format());
+        job.wrap = egui::text::TextWrapping { max_width: (w - 12.0 - pw - 8.0 - tx_off).max(20.0), max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+        let g = ui.painter().layout_job(job);
+        let (r, resp) = ui.allocate_exact_size(vec2(w, (g.size().y + 14.0).max(36.0)), Sense::click());
+        if here {
+            ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), cr(6.0), tk.accent_soft);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), cr(6.0), tk.hover);
+        }
+        // the arrow: its own 32px target
+        let arrow = Rect::from_min_size(pos2(r.min.x + indent, r.center().y - 16.0), vec2(28.0, 32.0));
+        if kids {
+            let ar = ui.interact(arrow, Id::new(("toc-arrow", fid, i)), Sense::click());
+            let c = arrow.center();
+            let col = if ar.hovered() { tk.text } else { tk.faint };
+            let pts = if open { vec![c + vec2(-4.0, -2.0), c + vec2(0.0, 2.5), c + vec2(4.0, -2.0)] } else { vec![c + vec2(-2.0, -4.0), c + vec2(2.5, 0.0), c + vec2(-2.0, 4.0)] };
+            ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.6, col)));
+            if ar.clicked() {
+                toggle = Some(i);
+            }
+        }
+        let tx = r.min.x + tx_off;
+        ui.painter().galley(pos2(tx, r.center().y - g.size().y / 2.0), g, ts.color);
+        ui.painter().galley(pos2(r.max.x - 12.0 - pw, r.center().y - pgg.size().y / 2.0), pgg, tk.faint);
+        if resp.clicked() && !(kids && arrow.contains(resp.interact_pointer_pos().unwrap_or_default())) {
+            go = Some(i);
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    ui.add_space(12.0);
+    if let Some(i) = toggle {
+        let open = is_open(i);
+        let set = app.pdf.expanded.entry(fid.to_string()).or_default();
+        if open {
+            set.remove(&i);
+            // an open ancestor of where you are needs saying "closed" explicitly
+            if ancestors.contains(&i) {
+                set.insert(usize::MAX - i);
+            }
+        } else {
+            set.insert(i);
+            set.remove(&(usize::MAX - i));
+        }
+    }
+    if let Some(i) = go {
+        let it = &items[i];
+        let y = crate::checkpoints::heading_y(app, fid, it).unwrap_or(it.y);
+        scroll_pdf_to(app, fid, it.page, y, 12.0);
+        // the page may not be laid out yet (far away): go there once it is
+        if content_y(app, fid, it.page, y).is_none() {
+            app.pdf.restore.insert(fid.to_string(), (it.page, y));
+        }
     }
 }

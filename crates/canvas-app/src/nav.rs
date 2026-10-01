@@ -237,6 +237,7 @@ pub const SHORTCUTS: &[(&str, &[(&[&str], &str)])] = &[
             (&["g i"], "Inbox"),
             (&["g n"], "Gemini Notebooks"),
             (&["g a"], "Anki"),
+            (&["g b"], "Textbooks"),
             (&["g s"], "Settings"),
             (&["r"], "Refresh this page from Canvas"),
             (&["t"], "Switch theme"),
@@ -265,8 +266,10 @@ pub const SHORTCUTS: &[(&str, &[(&[&str], &str)])] = &[
         ],
     ),
     (
-        "Checkpoints, in a PDF in the viewer",
+        "PDFs and textbooks in the viewer",
         &[
+            (&["o"], "Contents: the chapters and sections, to jump to"),
+            (&["F11"], "Fullscreen (Esc leaves it)"),
             (&["m"], "Checkpoint mode on or off (for adding checkpoints)"),
             (&["j", "k"], "In checkpoint mode: next and previous sentence"),
             (&["c"], "In checkpoint mode: a checkpoint after the sentence (c again to add it)"),
@@ -487,6 +490,25 @@ fn handle_key(app: &mut App, ctx: &Context, key: Key, m: &Modifiers, typing: boo
             return true;
         }
     }
+    // Fullscreen reading: F11 toggles it, Esc leaves it (after the palette and dialogs above).
+    if key == Key::F11 {
+        let on = !app.panes.fullscreen;
+        panes::set_fullscreen(app, on);
+        return true;
+    }
+    if key == Key::Escape && app.panes.fullscreen && !typing {
+        panes::set_fullscreen(app, false);
+        return true;
+    }
+    // o: a PDF's Contents panel
+    if name == "o" && !typing && !cmd && !m.alt && app.panes.focused == Pane::Viewer {
+        let has = app.panes.active_tab().map(|t| t.href().to_string()).and_then(|h| crate::pdf::fid_of(app, &h)).and_then(|f| app.pdf.info(&f).map(|i| !i.outline.is_empty())).unwrap_or(false);
+        if has {
+            let on = !app.pdf.contents;
+            crate::pdf::set_contents(app, on);
+            return true;
+        }
+    }
     // In the viewer, a PDF's checkpoints get the keys first.
     if app.panes.focused == Pane::Viewer && app.nav.g_prefix.is_none() && !typing && !cmd && !m.alt && crate::checkpoints::key(app, &name) {
         return true;
@@ -516,6 +538,7 @@ fn handle_key(app: &mut App, ctx: &Context, key: Key, m: &Modifiers, typing: boo
             "d" => "#/",
             "i" => "#/inbox",
             "a" => "#/anki",
+            "b" => "#/textbooks",
             "n" => "#/notebooks",
             "s" => "#/settings",
             _ => return true,

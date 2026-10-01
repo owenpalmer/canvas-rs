@@ -358,6 +358,21 @@ pub fn files(app: &mut App, ui: &mut Ui, pane: Pane, cid: &str) -> Result<(), Ne
     Ok(())
 }
 
+/// Home: the course's front page.
+pub fn home(app: &mut App, ui: &mut Ui, pane: Pane, cid: &str) -> Result<(), Need> {
+    let p = app.d.need1("front_page", cid)?;
+    let info = course_info(app, cid)?;
+    let tabs = app.d.need1("tabs", cid).ok();
+    course_shell(app, ui, pane, cid, "home", &info, tabs.as_deref());
+    let body = fmt::s(&p["body"]);
+    if body.trim().is_empty() {
+        w::empty(ui, "The home page is empty.");
+    } else {
+        crate::html::content(app, ui, &body, pane);
+    }
+    Ok(())
+}
+
 pub fn syllabus(app: &mut App, ui: &mut Ui, pane: Pane, cid: &str) -> Result<(), Need> {
     let body = app.d.need1("syllabus", cid)?;
     let info = course_info(app, cid)?;

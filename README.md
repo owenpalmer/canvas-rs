@@ -133,9 +133,23 @@ cache, so pages open instantly and stay readable offline. Keyboard: `Ctrl K` or 
 `g d` dashboard, `g i` inbox, `g a` Anki, `r` refresh, `t` theme, `?` for all shortcuts.
 Appearance settings (including the procedural vines) are under Settings.
 
+**Textbooks** (in the sidebar, `g b`). Add PDFs from this computer (Add a PDF…, a suggestion from
+your Downloads/Documents/Desktop, or drop one on the window); the files stay where they are. A
+textbook reads like a course PDF, opens where you left off, and is searchable. For any PDF with
+bookmarks, **Contents** (`o`) opens a sidebar of its chapters and sections (and glossary, index…) to
+jump to, following where you are. **Fullscreen** (`F11`, `Esc` to leave) gives the PDF the whole
+screen. In a book with sections, a checkpoint's passage starts no earlier than the section it's in
+(a checkpoint in 10.1 asks about 10.1, not chapter 9), up to eight pages back.
+
+**Course home.** A course whose Canvas home is a page has a **Home** tab, and opens there; a course
+whose home is its syllabus or assignments opens on those.
+
+On Linux the window draws its own minimize, maximize and close buttons, sized for touch; drag the
+top edge to move the window.
+
 **Search** (`Ctrl K` or `/`) finds titles, and also text inside everything cached: pages,
-assignment descriptions, announcements, discussions, the syllabus, messages, PDFs and lecture
-transcripts (from Panopto, when it's set up). Choosing a hit opens it in the viewer, scrolled to
+assignment descriptions, announcements, discussions, the syllabus, messages, PDFs, textbooks and
+lecture transcripts (from Panopto, when it's set up). Choosing a hit opens it in the viewer, scrolled to
 the passage, which is briefly highlighted. The index lives in `cache.db` and is brought up to date
 after each sync.
 
@@ -187,6 +201,7 @@ Everything lives in `~/.canvas-mcp/` (or `CANVAS_MCP_DIR`), readable only by you
 | `blobs/` | downloaded files and images |
 | `settings.json` | the app's preferences |
 | `checkpoints/` | each PDF's checkpoints and questions |
+| `textbooks.json` | your textbooks: where each file is and where you were |
 
 Delete the folder to remove everything. The demo (`--demo`) keeps its own in `~/.canvas-mcp/demo/`.
 

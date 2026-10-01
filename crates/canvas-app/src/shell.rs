@@ -75,6 +75,16 @@ fn layout(app: &mut App, screen: Rect) -> Layout {
     let w = screen.width();
     let p = &mut app.panes;
     let has_viewer = !p.tabs.is_empty() && !bare;
+    // fullscreen reading: the viewer is all there is
+    if p.fullscreen && has_viewer && p.active.is_some() {
+        p.open_sidebar = false;
+        p.open_main = false;
+        p.open_viewer = true;
+        p.side_w_now = 0.0;
+        p.view_w_now = w;
+        return Layout { sidebar: None, main: None, viewer: Some(screen), bare };
+    }
+    p.fullscreen = false;
     p.open_sidebar = !p.hidden.contains("sidebar") && !bare;
     p.open_viewer = has_viewer && !p.hidden.contains("viewer");
     p.open_main = !p.hidden.contains("main") || !p.open_viewer;
@@ -134,6 +144,11 @@ pub fn draw(app: &mut App, root: &mut Ui, frame: &mut eframe::Frame) {
     if let Some(r) = lay.main {
         paper.vignette(&painter, r, tk.vignette, fade);
     }
+    // On Linux the window draws its own (touch-sized) buttons, at the top right.
+    app.panes.controls_w = if OWN_CONTROLS && !app.panes.fullscreen { 3.0 * CONTROL_W } else { 0.0 };
+    if OWN_CONTROLS && !app.panes.fullscreen {
+        window_drag(root, screen);
+    }
     // Vines, behind each region's content, pinned to its visible area.
     crate::vines::paint(app, root, lay.sidebar, lay.main, fade);
 
@@ -170,6 +185,12 @@ pub fn draw(app: &mut App, root: &mut Ui, frame: &mut eframe::Frame) {
     if !lay.bare {
         resize_handles(app, root, &lay, screen);
     }
+    if app.panes.controls_w > 0.0 {
+        window_controls(root, screen);
+    }
+    if app.panes.fullscreen {
+        fullscreen_bar(app, root, screen);
+    }
     crate::setup::banner(app, &ctx);
     crate::palette::draw(app, &ctx);
     crate::nav::draw_keys(app, &ctx);
@@ -180,6 +201,113 @@ pub fn draw(app: &mut App, root: &mut Ui, frame: &mut eframe::Frame) {
     if title != app.title {
         app.title = title.clone();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+}
+
+/// Whether the app draws its own window buttons (Linux: the system's are tiny, or missing).
+pub const OWN_CONTROLS: bool = cfg!(target_os = "linux");
+/// A window button: big enough for a finger.
+const CONTROL_W: f32 = 48.0;
+const CONTROL_H: f32 = 40.0;
+
+/// The window's top edge, where nothing else is: dragging moves the window, double-clicking
+/// maximizes it. (Registered before the panes, so their own controls come first.)
+fn window_drag(root: &mut Ui, screen: Rect) {
+    let strip = Rect::from_min_size(screen.min, vec2(screen.width(), 8.0 + 30.0));
+    let resp = root.interact(strip, Id::new("window-drag"), Sense::click_and_drag());
+    let ctx = root.ctx().clone();
+    if resp.double_clicked() {
+        let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+    } else if resp.drag_started() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+/// Minimize, maximize (or restore) and close, at the window's top right.
+fn window_controls(root: &mut Ui, screen: Rect) {
+    let tk = t();
+    let ctx = root.ctx().clone();
+    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let layer = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("window-controls")));
+    for (i, kind) in ["min", "max", "close"].into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(screen.max.x - CONTROL_W * (3 - i) as f32, screen.min.y), vec2(CONTROL_W, CONTROL_H));
+        let resp = root.interact(r, Id::new(("window-control", kind)), Sense::click());
+        let hot = resp.hovered() || resp.is_pointer_button_down_on();
+        let close = kind == "close";
+        if hot {
+            layer.rect_filled(r, 0.0, if close { Color32::from_rgb(0xc4, 0x2b, 0x1c) } else { tk.hover });
+        }
+        let col = if hot && close { Color32::WHITE } else if hot { tk.text } else { tk.muted };
+        let c = r.center();
+        let st = Stroke::new(1.4, col);
+        match kind {
+            "min" => {
+                layer.line_segment([c + vec2(-6.0, 0.5), c + vec2(6.0, 0.5)], st);
+            }
+            "max" if maximized => {
+                // restore: two overlapping squares
+                layer.rect_stroke(Rect::from_center_size(c + vec2(-1.5, 1.5), vec2(9.0, 9.0)), 1.0, st, StrokeKind::Middle);
+                layer.add(egui::Shape::line(vec![c + vec2(-1.5, -3.0), c + vec2(-1.5, -4.5) + vec2(0.0, 0.0), c + vec2(4.5, -4.5), c + vec2(4.5, 1.5), c + vec2(3.0, 1.5)], st));
+            }
+            "max" => {
+                layer.rect_stroke(Rect::from_center_size(c, vec2(11.0, 11.0)), 1.0, st, StrokeKind::Middle);
+            }
+            _ => {
+                layer.line_segment([c + vec2(-5.5, -5.5), c + vec2(5.5, 5.5)], st);
+                layer.line_segment([c + vec2(5.5, -5.5), c + vec2(-5.5, 5.5)], st);
+            }
+        }
+        let tip = match kind {
+            "min" => "Minimize",
+            "max" if maximized => "Restore",
+            "max" => "Maximize",
+            _ => "Close",
+        };
+        if resp.on_hover_text(tip).clicked() {
+            ctx.send_viewport_cmd(match kind {
+                "min" => egui::ViewportCommand::Minimized(true),
+                "max" => egui::ViewportCommand::Maximized(!maximized),
+                _ => egui::ViewportCommand::Close,
+            });
+        }
+    }
+}
+
+/// In fullscreen: a small bar at the top right with Contents (for a PDF with chapters) and Exit.
+fn fullscreen_bar(app: &mut App, root: &mut Ui, screen: Rect) {
+    let tk = t();
+    let fid = app.panes.active_tab().map(|t| t.href().to_string()).and_then(|h| crate::pdf::fid_of(app, &h));
+    let outline = fid.as_ref().and_then(|f| app.pdf.info(f)).map(|i| !i.outline.is_empty()).unwrap_or(false);
+    let labels: Vec<&str> = if outline { vec!["Contents", "Exit fullscreen"] } else { vec!["Exit fullscreen"] };
+    let ts = crate::widgets::Ts::new(13.0, 500, tk.text);
+    let widths: Vec<f32> = labels.iter().map(|l| crate::widgets::lay(root, l, ts, None, false).size().x + 28.0).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 6.0 * (labels.len() as f32 - 1.0) + 12.0;
+    let bar = Rect::from_min_size(pos2(screen.max.x - 14.0 - total - 12.0, screen.min.y + 10.0), vec2(total, 48.0));
+    let layer = root.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("fullscreen-bar")));
+    let shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(50) };
+    layer.add(shadow.as_shape(bar, cr(24.0)));
+    layer.rect_filled(bar, cr(24.0), theme::alpha(tk.panel_solid, 0.94));
+    layer.rect_stroke(bar, cr(24.0), Stroke::new(1.0, tk.line), StrokeKind::Inside);
+    let mut x = bar.min.x + 6.0;
+    for (label, w) in labels.iter().zip(widths) {
+        let r = Rect::from_min_size(pos2(x, bar.min.y + 6.0), vec2(w, 36.0));
+        let resp = root.interact(r, Id::new(("fullscreen-bar", *label)), Sense::click());
+        let on = *label == "Contents" && app.pdf.contents;
+        if resp.hovered() || on {
+            layer.rect_filled(r, cr(18.0), if on { tk.accent_soft } else { tk.hover });
+        }
+        let g = crate::widgets::lay(root, label, ts.c(if on { tk.accent } else { tk.text }), None, false);
+        layer.galley(r.center() - g.size() / 2.0, g, tk.text);
+        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            if *label == "Contents" {
+                let on = !app.pdf.contents;
+                crate::pdf::set_contents(app, on);
+            } else {
+                panes::set_fullscreen(app, false);
+            }
+        }
+        x += w + 6.0;
     }
 }
 

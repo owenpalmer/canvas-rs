@@ -231,6 +231,9 @@ pub fn docs_from_cache(e: &Engine) -> Vec<Doc> {
             }
             out.push(Doc { key: format!("d:{id}"), kind, title: s(&d["title"]), course: label.clone(), href: format!("#/c/{cid}/d/{id}"), sections });
         }
+        if let Some(home) = e.cached("front_page", &a) {
+            out.push(Doc { key: format!("home:{cid}"), kind: "page", title: s(&home["title"]), course: label.clone(), href: format!("#/c/{cid}/home"), sections: html_sections(home["body"].as_str().unwrap_or("")) });
+        }
         if let Some(Value::String(body)) = e.cached("syllabus", &a) {
             out.push(Doc { key: format!("syl:{cid}"), kind: "syllabus", title: "Syllabus".into(), course: label.clone(), href: format!("#/c/{cid}/syllabus"), sections: html_sections(&body) });
         }

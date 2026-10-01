@@ -21,6 +21,7 @@ mod html;
 mod images;
 mod math;
 mod search;
+mod textbooks;
 mod nav;
 mod notebooks;
 mod palette;
@@ -236,6 +237,8 @@ fn main() {
             .with_app_id("canvas-desktop")
             .with_inner_size(size.unwrap_or([1280.0, 860.0]))
             .with_min_inner_size([480.0, 360.0])
+            // Linux: the app draws its own touch-sized window buttons
+            .with_decorations(!shell::OWN_CONTROLS)
             .with_icon(icon),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()

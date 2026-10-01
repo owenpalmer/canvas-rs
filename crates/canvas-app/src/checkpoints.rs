@@ -106,6 +106,10 @@ pub struct DocSt {
     course: Option<String>,
     pages: usize,
     save_at: Option<Instant>,
+    /// the PDF's chapters and sections (empty when it has no bookmarks)
+    outline: Arc<Vec<crate::pdf::OutlineItem>>,
+    /// the pages the reading sentences were built from (long books: around where you are)
+    sent_window: (usize, usize),
 }
 
 /// Something waiting for pages' text before it goes on.
@@ -256,7 +260,7 @@ pub fn attach(app: &mut App, fid: &str, key: &str, name: &str, cid: Option<&str>
         let cuts = saved.as_array().map(|a| a.iter().filter_map(cut_from).collect()).unwrap_or_default();
         app.cp.docs.insert(
             key.to_string(),
-            DocSt { cuts, sentences: None, sent: -1, pending_cut: None, active: None, fid: String::new(), name: String::new(), course: None, pages: 0, save_at: None },
+            DocSt { cuts, sentences: None, sent: -1, pending_cut: None, active: None, fid: String::new(), name: String::new(), course: None, pages: 0, save_at: None, outline: Arc::new(vec![]), sent_window: (0, 0) },
         );
     }
     let st = app.cp.docs.get_mut(key).unwrap();
@@ -264,6 +268,7 @@ pub fn attach(app: &mut App, fid: &str, key: &str, name: &str, cid: Option<&str>
     st.name = name.to_string();
     st.course = cid.map(String::from);
     st.pages = info.pages.len();
+    st.outline = info.outline.clone();
     app.cp.current = Some((key.to_string(), app.frame_no));
     if app.cp.mode {
         prepare_reading(app, key);
@@ -379,11 +384,88 @@ fn remove_cut(app: &mut App, key: &str, id: &str) {
     save_cuts(app, key);
 }
 
-/// The passage a checkpoint asks about: back to the previous checkpoint, at most two pages.
-fn region_for(st: &DocSt, id: &str) -> (f32, f32) {
+/// The passage a checkpoint asks about: back to the previous checkpoint, at most two pages. In a
+/// PDF with chapters and sections, back to the start of the section it's in instead (so a
+/// checkpoint in 10.1 starts at 10.1, not in chapter 9), at most MAX_SECTION_PAGES.
+fn region_for(app: &App, st: &DocSt, id: &str) -> (f32, f32) {
     let end = st.cuts.iter().find(|c| c.id == id).map(|c| c.abs()).unwrap_or(0.0);
     let prev = st.cuts.iter().map(|c| c.abs()).filter(|a| *a < end).fold(0.0f32, f32::max);
-    (prev.max(end - MAX_REGION_PAGES), end)
+    passage_bounds(prev, section_start(app, st, end), end)
+}
+
+/// A passage from the last checkpoint before `end` (`prev`, or 0) and the start of the section
+/// `end` is in (when the PDF has sections).
+fn passage_bounds(prev: f32, section: Option<f32>, end: f32) -> (f32, f32) {
+    match section {
+        Some(start) => (prev.max(start).max(end - MAX_SECTION_PAGES), end),
+        None => (prev.max(end - MAX_REGION_PAGES), end),
+    }
+}
+
+/// How far back a checkpoint's passage reaches in a book with sections.
+const MAX_SECTION_PAGES: f32 = 8.0;
+/// Pictures sent of a passage: its last pages.
+const MAX_IMAGES: usize = 4;
+
+/// Where the section containing `pos` starts (its heading, found on the page when its text is
+/// loaded, else the top of the page), in a PDF with an outline.
+fn section_start(app: &App, st: &DocSt, pos: f32) -> Option<f32> {
+    let last = crate::pdf::section_at(&st.outline, pos - 0.001)?;
+    // Bookmarks point at the top of the heading's page; the heading itself may be lower, below
+    // `pos`, and then `pos` is still in the section before it.
+    for i in (0..=last).rev().take(4) {
+        let it = &st.outline[i];
+        let start = it.page as f32 + heading_y(app, &st.fid, it).unwrap_or(it.y);
+        if start < pos {
+            return Some(start);
+        }
+    }
+    let it = &st.outline[last];
+    Some(it.page as f32 + it.y)
+}
+
+/// Where an outline entry's heading is on its page (the top of its line), when the page's text is
+/// loaded: the first line that reads like the title, preferring larger type.
+pub fn heading_y(app: &App, fid: &str, it: &crate::pdf::OutlineItem) -> Option<f32> {
+    let text = app.pdf.docs.get(fid)?.text.get(&it.page)?.clone();
+    find_heading(&text, &it.title)
+}
+
+/// Where a heading with this title is on a page (fraction from the top), if it's there.
+pub fn find_heading(text: &PageText, title: &str) -> Option<f32> {
+    let words = |s: &str| canvas_mcp::fulltext::norm(s).split(' ').filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit())).map(String::from).collect::<Vec<_>>();
+    let want: Vec<String> = words(title).into_iter().take(4).collect();
+    if want.is_empty() {
+        return None;
+    }
+    // the page's lines: runs on the same baseline
+    let mut lines: Vec<(String, f32, f32)> = Vec::new(); // (text, top, height)
+    for item in &text.items {
+        match lines.last_mut() {
+            Some(l) if ((l.1 + l.2) - item.y).abs() < 0.5 * l.2.max(item.h) => {
+                l.0.push(' ');
+                l.0.push_str(&item.s);
+                l.2 = l.2.max(item.h);
+            }
+            _ => lines.push((item.s.clone(), item.y - item.h, item.h)),
+        }
+    }
+    let mut hs: Vec<f32> = lines.iter().map(|l| l.2).collect();
+    hs.sort_by(f32::total_cmp);
+    let median = hs.get(hs.len() / 2).copied().unwrap_or(0.0);
+    let line_words: Vec<Vec<String>> = lines.iter().map(|l| words(&l.0)).collect();
+    // the title's first words on one line; a heading that wraps has fewer of them there, so then
+    // fewer words will do, but only in heading-sized type
+    for n in (want.len().min(2)..=want.len()).rev() {
+        let w = &want[..n];
+        let found: Vec<usize> = (0..lines.len()).filter(|&i| line_words[i].windows(n).any(|x| x == w)).collect();
+        let big = found.iter().copied().find(|&i| lines[i].2 > median * 1.15);
+        let pick = if n == want.len() { big.or(found.first().copied()) } else { big };
+        if let Some(i) = pick {
+            return Some((lines[i].1 - 0.004).max(0.0));
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -518,19 +600,24 @@ enum Target {
 fn request_cards(app: &mut App, key: &str, id: &str, count: Option<usize>, avoid: Vec<String>, target: Target) {
     let Some(st) = app.cp.docs.get(key) else { return };
     let Some(cut) = st.cuts.iter().find(|c| c.id == id) else { return };
-    let (a, b) = cut.range.unwrap_or_else(|| region_for(st, id));
+    let (a, b) = cut.range.unwrap_or_else(|| region_for(app, st, id));
     let (fid, pages, name) = (st.fid.clone(), st.pages, st.name.clone());
-    let mut need = seg_pages(pages, (a - CONTEXT_PAGES).max(0.0), a);
+    // background from before the passage, but not from an earlier section
+    let floor = section_start(app, st, a + 0.0005).filter(|f| *f <= a).unwrap_or(0.0);
+    let c0 = (a - CONTEXT_PAGES).max(0.0).max(floor);
+    let mut need = seg_pages(pages, c0, a);
     need.extend(seg_pages(pages, a, b));
     need.sort();
     need.dedup();
     let (key, id) = (key.to_string(), id.to_string());
     wait_text(app, &fid.clone(), need, move |app| {
         let section = text_between(app, &fid, pages, a, b);
-        let context = text_between(app, &fid, pages, (a - CONTEXT_PAGES).max(0.0), a);
+        let context = if c0 < a { text_between(app, &fid, pages, c0, a) } else { String::new() };
         let chars: Vec<char> = context.chars().collect();
         let context: String = chars[chars.len().saturating_sub(4000)..].iter().collect();
+        // pictures of the passage's last pages
         let segs = segments(pages, a, b);
+        let segs = segs[segs.len().saturating_sub(MAX_IMAGES)..].to_vec();
         render_segments(app, &fid, segs, 1100, move |app, parts| {
             app.prefs.flush(true); // the model settings are read from the file
             let tx = app.tx.clone();
@@ -658,15 +745,32 @@ fn finish(app: &mut App, key: &str, id: &str, target: Target, err: Option<GenErr
 
 fn generate(app: &mut App, key: &str, id: &str) {
     let Some(st) = app.cp.docs.get_mut(key) else { return };
-    let range = region_for(st, id);
     let Some(cut) = st.cuts.iter_mut().find(|c| c.id == id) else { return };
-    cut.range = Some(range);
+    let end = cut.abs();
     cut.status = "loading".into();
     cut.error = None;
     cut.cards.clear();
     cut.idx = 0;
     cut.streaming = true;
-    request_cards(app, key, id, None, vec![], Target::Fill);
+    // the section's heading page needs its text to find where the section starts
+    let pages: Vec<usize> = match crate::pdf::section_at(&st.outline, end - 0.001) {
+        Some(last) => {
+            let mut v: Vec<usize> = (0..=last).rev().take(4).map(|i| st.outline[i].page).collect();
+            v.dedup();
+            v
+        }
+        None => vec![],
+    };
+    let fid = st.fid.clone();
+    let (k, i) = (key.to_string(), id.to_string());
+    wait_text(app, &fid, pages, move |app| {
+        let Some(st) = app.cp.docs.get(&k) else { return };
+        let range = region_for(app, st, &i);
+        if let Some(cut) = find_cut(app, &k, &i) {
+            cut.range = Some(range);
+        }
+        request_cards(app, &k, &i, None, vec![], Target::Fill);
+    });
 }
 
 /// Replace one question, steering away from the ones already there.
@@ -734,7 +838,7 @@ fn send_to_anki(app: &mut App, key: &str, id: &str, u: u64) {
     let Some(st) = app.cp.docs.get(key) else { return };
     let Some(cut) = st.cuts.iter().find(|c| c.id == id) else { return };
     let Some(card) = cut.cards.iter().find(|c| c.uid == u).cloned() else { return };
-    let (a, b) = cut.range.unwrap_or_else(|| region_for(st, id));
+    let (a, b) = cut.range.unwrap_or_else(|| region_for(app, st, id));
     let hint_file = cut.hint_file.clone().unwrap_or_else(|| format!("pdfcp_{}.png", cut.id));
     let need_hint = cut.hint_file.is_none();
     let (fid, pages, name, course) = (st.fid.clone(), st.pages, st.name.clone(), st.course.clone());
@@ -795,24 +899,55 @@ fn send_to_anki(app: &mut App, key: &str, id: &str, u: u64) {
 }
 
 // ---------- reading sentence by sentence ----------
+/// Pages of sentences built at a time in a long PDF: a little before where you are, more after.
+const READ_BEHIND: usize = 3;
+const READ_AHEAD: usize = 12;
+
 fn prepare_reading(app: &mut App, key: &str) {
     let Some(st) = app.cp.docs.get(key) else { return };
-    if st.sentences.is_some() || st.pages == 0 {
+    if st.pages == 0 {
         return;
     }
     let (fid, n) = (st.fid.clone(), st.pages);
+    // a short PDF is read whole; a long one around the page you're on
+    let here = crate::pdf::current_pos(app, &fid).map(|p| p as usize).unwrap_or(0);
+    let window = if n <= READ_BEHIND + READ_AHEAD + 1 { (0, n) } else { (here.saturating_sub(READ_BEHIND), (here + READ_AHEAD).min(n)) };
+    if st.sentences.is_some() {
+        let (a, b) = st.sent_window;
+        // rebuilt once you've read past the window's start or near its end (not at the book's end)
+        let inside = here >= a && (here + 3 <= b || b == n);
+        if inside {
+            return;
+        }
+    }
     let tx = app.tx.clone();
-    let mut texts = Vec::with_capacity(n);
-    for p in 0..n {
+    let mut texts = Vec::with_capacity(window.1 - window.0);
+    for p in window.0..window.1 {
         match app.pdf.text(&tx, &fid, p) {
-            Some(t_) => texts.push(t_),
+            Some(t_) => texts.push((p, t_)),
             None => return, // asked; next frame
         }
     }
-    let s = build_sentences(&texts);
-    if let Some(st) = app.cp.docs.get_mut(key) {
-        st.sentences = Some(s);
+    let s = build_sentences_at(&texts);
+    let st = app.cp.docs.get_mut(key).unwrap();
+    // keep the highlighted sentence highlighted in the rebuilt list
+    let was = usize::try_from(st.sent).ok().and_then(|i| st.sentences.as_ref()?.get(i)).map(|x| (x.rects[0].page, x.rects[0].top));
+    st.sent = was.and_then(|(p, top)| s.iter().position(|x| x.rects[0].page == p && (x.rects[0].top - top).abs() < 1e-4)).map(|i| i as i64).unwrap_or(-1);
+    st.sentences = Some(s);
+    st.sent_window = window;
+}
+
+/// Sentences of some pages (their page numbers given): like build_sentences, numbered right.
+fn build_sentences_at(pages: &[(usize, Arc<PageText>)]) -> Vec<Sentence> {
+    let texts: Vec<Arc<PageText>> = pages.iter().map(|(_, t_)| t_.clone()).collect();
+    let first = pages.first().map(|p| p.0).unwrap_or(0);
+    let mut out = build_sentences(&texts);
+    for s in out.iter_mut() {
+        for r in s.rects.iter_mut() {
+            r.page += first;
+        }
     }
+    out
 }
 
 /// The whole document's text as one string (remembering where each character came from), split
@@ -1780,6 +1915,19 @@ mod tests {
 
     fn it(s: &str, x: f32, y: f32, eol: bool) -> TItem {
         TItem { s: s.into(), eol, x, y, w: s.len() as f32 * 0.01, h: 0.012 }
+    }
+
+    #[test]
+    fn passages_stop_at_their_section() {
+        // no sections: back to the last checkpoint, at most two pages
+        assert_eq!(passage_bounds(0.0, None, 10.5), (8.5, 10.5));
+        assert_eq!(passage_bounds(9.0, None, 10.5), (9.0, 10.5));
+        // in section 2-2 (starting partway down page 63): not into 2-1 or chapter 1
+        assert_eq!(passage_bounds(40.0, Some(62.3), 64.2), (62.3, 64.2));
+        // an earlier checkpoint in the same section still comes first
+        assert_eq!(passage_bounds(63.0, Some(62.3), 64.2), (63.0, 64.2));
+        // a long section: the last eight pages of it
+        assert_eq!(passage_bounds(0.0, Some(50.0), 64.0), (56.0, 64.0));
     }
 
     #[test]

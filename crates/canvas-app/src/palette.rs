@@ -176,7 +176,7 @@ fn update(app: &mut App) {
         match app.d.peek("courses").and_then(|c| c.as_array().cloned()) {
             Some(courses) => {
                 for c in crate::sidebar::ordered_courses(app, &courses, false) {
-                    let h = format!("#/c/{}/modules", crate::fmt::id(&c["id"]));
+                    let h = crate::views::course_href(app, &crate::fmt::id(&c["id"]));
                     let short = format!("#/c/{}", crate::fmt::id(&c["id"]));
                     out.push(by_hash.get(&short).or(by_hash.get(&h)).cloned().unwrap_or(PItem { k: "course".into(), t: crate::fmt::s(&c["name"]), c: crate::fmt::s(&c["course_code"]), h: Some(h), cmd: None, snippet: None, hit: None }));
                 }

@@ -22,7 +22,7 @@ pub fn ttl(name: &str) -> Option<f64> {
         "past_courses" => 24.0 * 60.0 * MIN,
         "planner" | "announcements" | "course_announcements" | "groups" | "submission" | "modules" | "pages" | "discussions" | "topic" => 5.0 * MIN,
         "inbox" | "conversation" => 3.0 * MIN,
-        "page" => 30.0 * MIN,
+        "page" | "front_page" => 30.0 * MIN,
         "files" => 15.0 * MIN,
         "file" => 60.0 * MIN,
         "syllabus" => 60.0 * MIN,
@@ -91,6 +91,8 @@ pub async fn fetch(c: &Client, name: &str, args: &[String]) -> Result<Value> {
         "modules" => c.get(&format!("courses/{}/modules", arg(args, 0)?), params![("include[]", "items"), ("include[]", "content_details"), ("per_page", 100)]).await?,
         "pages" => c.get(&format!("courses/{}/pages", arg(args, 0)?), params![("sort", "title"), ("per_page", 100)]).await?,
         "page" => c.get(&format!("courses/{}/pages/{}", arg(args, 0)?, arg(args, 1)?), vec![]).await?,
+        // the course's home page, when its home is a page ("wiki")
+        "front_page" => c.get(&format!("courses/{}/front_page", arg(args, 0)?), vec![]).await?,
         "files" => {
             let cid = arg(args, 0)?;
             let (fp, dp) = (format!("courses/{cid}/files"), format!("courses/{cid}/folders"));

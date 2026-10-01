@@ -24,6 +24,7 @@ pub mod resources;
 pub mod services;
 pub mod signin;
 pub mod store;
+pub mod textbooks;
 pub mod util;
 
 pub use error::{Error, Result};

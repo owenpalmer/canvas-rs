@@ -164,13 +164,14 @@ fn active_href(app: &App) -> Option<String> {
     let r = app.route();
     let cm = regex::Regex::new(r"^/c/(\d+)").unwrap().captures(&r.path).map(|m| m[1].to_string());
     if let Some(cid) = cm {
-        return Some(format!("#/c/{cid}/modules"));
+        return Some(crate::views::course_href(app, &cid));
     }
     Some(match r.view {
         View::Dashboard => "#/",
         View::Inbox | View::Conversation(_) => "#/inbox",
         View::Notebooks | View::Notebook(_) | View::NotebookNew | View::NotebookAdd(_) => "#/notebooks",
         View::Anki | View::AnkiImport | View::AnkiDeck(_) => "#/anki",
+        View::Textbooks | View::Textbook(_) => "#/textbooks",
         View::Settings => "#/settings",
         _ => return None,
     }
@@ -298,6 +299,7 @@ fn content(app: &mut App, ui: &mut Ui) {
             count_badge(ui, r, n, t().ok)
         }
     });
+    nav_link(app, ui, "nav-books", "#/textbooks", None, "Textbooks", None, |_, _, _| {});
     nav_link(app, ui, "nav-settings", "#/settings", None, "Settings", None, |_, _, _| {});
 
     // .section-label: 11px uppercase .06em faint, padding 14px 8px 4px, with ✎ at the right
@@ -334,7 +336,7 @@ fn content(app: &mut App, ui: &mut Ui) {
             let id = fmt::id(&c["id"]);
             let name = c["course_code"].as_str().filter(|x| !x.is_empty()).or(c["name"].as_str()).unwrap_or("").to_string();
             let full = fmt::s(&c["name"]);
-            nav_link(app, ui, &format!("course-{id}"), &format!("#/c/{id}/modules"), Some(color_for(&id, colors.as_deref())), &name, Some(&full), |_, _, _| {});
+            nav_link(app, ui, &format!("course-{id}"), &crate::views::course_href(app, &id), Some(color_for(&id, colors.as_deref())), &name, Some(&full), |_, _, _| {});
         }
     }
     past_section(app, ui, colors.as_deref());
@@ -511,7 +513,7 @@ fn past_section(app: &mut App, ui: &mut Ui, colors: Option<&Value>) {
             let name = c["course_code"].as_str().filter(|x| !x.is_empty()).or(c["name"].as_str()).unwrap_or("").to_string();
             let full = fmt::s(&c["name"]);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min + vec2(16.0, 0.0), vec2(w - 16.0, 31.0))));
-            nav_link(app, &mut child, &format!("course-{id}"), &format!("#/c/{id}/modules"), Some(color_for(&id, colors)), &name, Some(&full), |_, _, _| {});
+            nav_link(app, &mut child, &format!("course-{id}"), &crate::views::course_href(app, &id), Some(color_for(&id, colors)), &name, Some(&full), |_, _, _| {});
             ui.allocate_space(vec2(w, 31.0));
         }
     }

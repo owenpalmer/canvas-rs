@@ -123,6 +123,14 @@ pub fn open_hit(app: &mut App, hit: &Value) {
 }
 
 // ---------- finding the section in a drawn document ----------
+/// The PDF a hit's address shows: a textbook (#/t/id) or a Canvas file (…/f/id).
+fn pdf_fid(href: &str) -> Option<String> {
+    if let Some(id) = href.strip_prefix("#/t/") {
+        return Some(format!("tb-{id}"));
+    }
+    href.rsplit_once("/f/").map(|(_, f)| f.to_string())
+}
+
 fn pane_shows(app: &App, pane: Pane, href: &str) -> bool {
     let want = if pane == Pane::Viewer { &app.viewer.want } else { &app.main.want };
     want == href || want.ends_with(&format!(":{href}"))
@@ -209,7 +217,7 @@ pub fn resolve(app: &mut App, pane: Pane, top: f32, view_h: f32) {
 /// matching runs.
 pub fn pdf(app: &mut App, fid: &str) {
     let Some(f) = app.search.find.as_ref() else { return };
-    if f.kind != "pdf" || !f.href.ends_with(&format!("/f/{fid}")) {
+    if f.kind != "pdf" || pdf_fid(&f.href).as_deref() != Some(fid) {
         return;
     }
     if f.found.is_some() {
@@ -299,7 +307,7 @@ fn marks(chars: &[crate::pdf::Ch], needle: &str) -> Vec<[f32; 4]> {
 /// A PDF page's highlighted runs (fractions of the page) and their strength.
 pub fn pdf_marks(app: &App, fid: &str, page: usize) -> (Vec<[f32; 4]>, f32) {
     let Some(f) = app.search.find.as_ref() else { return (vec![], 0.0) };
-    if f.kind != "pdf" || !f.href.ends_with(&format!("/f/{fid}")) {
+    if f.kind != "pdf" || pdf_fid(&f.href).as_deref() != Some(fid) {
         return (vec![], 0.0);
     }
     let Some((_, since)) = &f.found else { return (vec![], 0.0) };

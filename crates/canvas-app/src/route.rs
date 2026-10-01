@@ -23,6 +23,8 @@ pub enum View {
     Files(String),
     File(Option<String>, String),
     Syllabus(String),
+    /// a course's home page (when its home is a page)
+    Home(String),
     /// a lecture recording's transcript (course, recording id)
     Recording(String, String),
     Welcome,
@@ -34,6 +36,9 @@ pub enum View {
     Anki,
     AnkiImport,
     AnkiDeck(i64),
+    Textbooks,
+    /// a textbook (its id in the library)
+    Textbook(String),
     NotFound,
 }
 
@@ -79,6 +84,7 @@ static ROUTES: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (r"^/c/(\d+)/f/(\d+)$", "cfile"),
         (r"^/f/(\d+)$", "file"),
         (r"^/c/(\d+)/syllabus$", "syllabus"),
+        (r"^/c/(\d+)/home$", "home"),
         (r"^/c/(\d+)/rec/([\w-]+)$", "recording"),
         (r"^/welcome$", "welcome"),
         (r"^/settings$", "settings"),
@@ -89,6 +95,8 @@ static ROUTES: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (r"^/anki$", "anki"),
         (r"^/anki/import$", "ankiimport"),
         (r"^/anki/deck/(\d+)$", "ankideck"),
+        (r"^/textbooks$", "textbooks"),
+        (r"^/t/(\w+)$", "textbook"),
     ]
     .into_iter()
     .map(|(p, n)| (Regex::new(p).unwrap(), n))
@@ -126,6 +134,7 @@ pub fn parse(hash: &str) -> Route {
                 "cfile" => View::File(Some(g(1)), g(2)),
                 "file" => View::File(None, g(1)),
                 "syllabus" => View::Syllabus(g(1)),
+                "home" => View::Home(g(1)),
                 "recording" => View::Recording(g(1), g(2)),
                 "welcome" => View::Welcome,
                 "settings" => View::Settings,
@@ -136,6 +145,8 @@ pub fn parse(hash: &str) -> Route {
                 "anki" => View::Anki,
                 "ankiimport" => View::AnkiImport,
                 "ankideck" => View::AnkiDeck(g(1).parse().unwrap_or(0)),
+                "textbooks" => View::Textbooks,
+                "textbook" => View::Textbook(g(1)),
                 _ => View::NotFound,
             };
             break;
@@ -150,7 +161,7 @@ pub fn path_of(href: &str) -> String {
 }
 
 static DOC_ROUTES: Lazy<Vec<Regex>> = Lazy::new(|| {
-    [r"^/c/\d+/[adf]/\d+$", r"^/c/\d+/p/.+$", r"^/c/\d+/rec/[\w-]+$", r"^/f/\d+$", r"^/inbox/\d+$"].iter().map(|p| Regex::new(p).unwrap()).collect()
+    [r"^/c/\d+/[adf]/\d+$", r"^/c/\d+/p/.+$", r"^/c/\d+/rec/[\w-]+$", r"^/t/\w+$", r"^/f/\d+$", r"^/inbox/\d+$"].iter().map(|p| Regex::new(p).unwrap()).collect()
 });
 
 /// Documents (pages, files, assignments, discussions, messages) open in the viewer.
@@ -177,6 +188,6 @@ mod tests {
         assert_eq!(parse("#/notebooks/new?c=101&m=all").query.get("m").unwrap(), "all");
         assert_eq!(parse("#/notebooks/abc-1/add").view, View::NotebookAdd("abc-1".into()));
         assert_eq!(parse("#/nope").view, View::NotFound);
-        assert!(is_doc("#/c/1/a/2") && is_doc("#/f/9") && is_doc("#/inbox/3") && is_doc("#/c/1/rec/ab-12") && !is_doc("#/c/1/files"));
+        assert!(is_doc("#/c/1/a/2") && is_doc("#/f/9") && is_doc("#/inbox/3") && is_doc("#/c/1/rec/ab-12") && is_doc("#/t/ab12") && !is_doc("#/textbooks") && !is_doc("#/c/1/files"));
     }
 }

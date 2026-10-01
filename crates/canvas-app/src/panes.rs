@@ -54,6 +54,10 @@ pub struct Panes {
     pub view_w_now: f32,
     pub preview_at: Option<(String, Instant)>,
     pub titling: HashSet<String>,
+    /// the viewer fills the window (reading a PDF)
+    pub fullscreen: bool,
+    /// the width the window's own buttons take at the top right (0 without them)
+    pub controls_w: f32,
 }
 
 impl Panes {
@@ -73,6 +77,8 @@ impl Panes {
             view_w_now: 0.0,
             preview_at: None,
             titling: HashSet::new(),
+            fullscreen: false,
+            controls_w: 0.0,
         };
         for t in prefs.get("viewerTabs").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
             let h = t["h"].as_str().unwrap_or("").to_string();
@@ -522,7 +528,10 @@ pub fn draw_main(app: &mut App, ui: &mut Ui, rect: Rect, bare: bool, scale: f32)
         // #topbar: padding 10px 40px 0 34px
         if !bare {
             let top = ui.cursor().min.y;
-            let bar = Rect::from_min_size(pos2(x0 + 34.0, top + 10.0), vec2(col - 74.0, 26.0));
+            let mut bar = Rect::from_min_size(pos2(x0 + 34.0, top + 10.0), vec2(col - 74.0, 26.0));
+            if !app.panes.open_viewer {
+                bar.max.x = bar.max.x.min(pane_rect.max.x - app.panes.controls_w - 8.0);
+            }
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)));
             topbar(app, &mut bui);
             ui.allocate_space(vec2(w, 36.0));
@@ -564,23 +573,51 @@ fn topbar(app: &mut App, ui: &mut Ui) {
     crate::views::crumbs_line(app, ui, &out, Pane::Main);
 }
 
+/// Fullscreen reading: the viewer fills the window (and the window the screen).
+pub fn set_fullscreen(app: &mut App, on: bool) {
+    let on = on && app.panes.active_tab().is_some();
+    app.panes.fullscreen = on;
+    app.pdf.max_w = on.then_some(1100.0);
+    if on {
+        app.panes.focused = Pane::Viewer;
+    }
+    if let Some(c) = app.ctx() {
+        c.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+}
+
 pub fn draw_viewer(app: &mut App, ui: &mut Ui, rect: Rect) {
     let tk = t();
     if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
         app.panes.focused = Pane::Viewer;
     }
-    // .viewer-head: padding 8px 10px 0 8px, border-bottom 1px line
-    let head_h = 8.0 + 30.0;
+    // .viewer-head: padding 8px 10px 0 8px, border-bottom 1px line (none in fullscreen)
+    let full = app.panes.fullscreen;
+    let head_h = if full { 0.0 } else { 8.0 + 30.0 };
     let head = Rect::from_min_size(rect.min, vec2(rect.width(), head_h));
     // the pane buttons sit 5px above the border; the tabs stand on it
-    let btns = Rect::from_min_max(pos2(head.min.x + 8.0, head.max.y - 5.0 - 24.0), pos2(head.max.x - 10.0, head.max.y - 5.0));
-    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(btns).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("viewer-btns"));
-    pane_buttons(app, &mut bui, Pane::Viewer);
-    let tabs_x = bui.min_rect().max.x + 4.0;
-    let strip = Rect::from_min_max(pos2(tabs_x, head.max.y - 30.0), pos2(head.max.x - 10.0, head.max.y));
-    tabs_strip(app, ui, strip);
-    // #viewer-body: padding 14px 24px 60px
-    let body = Rect::from_min_max(pos2(rect.min.x, head.max.y), rect.max);
+    if !full {
+        let btns = Rect::from_min_max(pos2(head.min.x + 8.0, head.max.y - 5.0 - 24.0), pos2(head.max.x - 10.0, head.max.y - 5.0));
+        let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(btns).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("viewer-btns"));
+        pane_buttons(app, &mut bui, Pane::Viewer);
+        let tabs_x = bui.min_rect().max.x + 4.0;
+        // the window's buttons are at the top right
+        let strip = Rect::from_min_max(pos2(tabs_x, head.max.y - 30.0), pos2(head.max.x - 10.0 - app.panes.controls_w, head.max.y));
+        tabs_strip(app, ui, strip);
+    }
+    // #viewer-body: padding 14px 24px 60px; with a PDF's Contents open, the panel at its left
+    let mut body = Rect::from_min_max(pos2(rect.min.x, head.max.y), rect.max);
+    let toc = app.pdf.contents.then(|| app.panes.active_tab().map(|t| t.href().to_string())).flatten().and_then(|h| crate::pdf::fid_of(app, &h)).filter(|f| app.pdf.info(f).map(|i| !i.outline.is_empty()).unwrap_or(false));
+    if let Some(fid) = toc {
+        let w = (body.width() * 0.34).clamp(220.0, 330.0).min(body.width() * 0.5);
+        let panel = Rect::from_min_max(body.min, pos2(body.min.x + w, body.max.y));
+        ui.painter().rect_filled(panel, 0.0, tk.panel);
+        ui.painter().vline(panel.max.x - 0.5, panel.y_range(), Stroke::new(1.0, tk.line));
+        let mut pui = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(0.0, 0.0))).id_salt("toc"));
+        pui.set_clip_rect(panel);
+        egui::ScrollArea::vertical().id_salt("toc-scroll").auto_shrink([false, false]).show(&mut pui, |ui| crate::pdf::contents(app, ui, &fid));
+        body.min.x = panel.max.x;
+    }
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("viewer-body"));
     bui.set_clip_rect(body);
     if app.panes.active_tab().is_none() {

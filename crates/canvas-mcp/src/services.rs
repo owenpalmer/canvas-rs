@@ -196,6 +196,9 @@ impl Services {
             let cid = s(&a["context_code"]).split('_').nth(1).unwrap_or("").to_string();
             out.push(json!({"t": s(&a["title"]), "k": "announcement", "c": names.get(&cid).cloned().unwrap_or_default(), "h": format!("#/c/{cid}/d/{}", a["id"])}));
         }
+        for b in crate::textbooks::list() {
+            out.push(json!({"t": s(&b["title"]), "k": "textbook", "c": "Textbook", "h": format!("#/t/{}", s(&b["id"]))}));
+        }
         for m in e.cached_list("inbox", &[]) {
             let subject = m["subject"].as_str().filter(|x| !x.is_empty()).unwrap_or("(no subject)");
             out.push(json!({"t": subject, "k": "message", "c": s(&m["context_name"]), "h": format!("#/inbox/{}", m["id"])}));
@@ -249,8 +252,18 @@ impl Services {
                 let path = crate::files::blob_path(&fid, f);
                 let tag = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 if path.exists() && !crate::fulltext::has(e, &format!("pdf:{fid}"), &tag) {
-                    out.push(json!({"fid": fid, "cid": cid, "name": s(&f["display_name"]), "course": course, "path": path.to_string_lossy(), "tag": tag}));
+                    out.push(json!({"fid": fid, "href": format!("#/c/{cid}/f/{fid}"), "name": s(&f["display_name"]), "course": course, "path": path.to_string_lossy(), "tag": tag}));
                 }
+            }
+        }
+        for b in crate::textbooks::list() {
+            let path = PathBuf::from(s(&b["path"]));
+            let Ok(m) = std::fs::metadata(&path) else { continue };
+            let stamp = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            let tag = format!("{}-{stamp}", m.len());
+            let fid = format!("tb-{}", s(&b["id"]));
+            if !crate::fulltext::has(e, &format!("pdf:{fid}"), &tag) {
+                out.push(json!({"fid": fid, "href": format!("#/t/{}", s(&b["id"])), "name": s(&b["title"]), "course": "Textbook", "path": path.to_string_lossy(), "tag": tag}));
             }
         }
         out
@@ -258,8 +271,37 @@ impl Services {
 
     /// Put a PDF's page texts (extracted by the app) in the search index.
     pub fn index_pdf(&self, item: &Value, pages: Vec<String>) {
-        let (fid, cid) = (s(&item["fid"]), s(&item["cid"]));
-        crate::fulltext::put_pdf(&self.engine, &fid, &s(&item["tag"]), &s(&item["name"]), &s(&item["course"]), &format!("#/c/{cid}/f/{fid}"), pages);
+        crate::fulltext::put_pdf(&self.engine, &s(&item["fid"]), &s(&item["tag"]), &s(&item["name"]), &s(&item["course"]), &s(&item["href"]), pages);
+    }
+
+    // --- textbooks -----------------------------------------------------------------------------------
+    pub fn textbooks(&self) -> Vec<Value> {
+        crate::textbooks::list()
+    }
+
+    pub fn textbook(&self, id: &str) -> Option<Value> {
+        crate::textbooks::get(id)
+    }
+
+    pub fn textbook_add(&self, path: &str) -> ApiResult {
+        crate::textbooks::add(path).map_err(|e| ApiErr::new(400, "textbook", e.to_string()))
+    }
+
+    pub fn textbook_remove(&self, id: &str) -> ApiResult {
+        crate::textbooks::remove(id).map_err(|e| ApiErr::new(500, "textbook", e.to_string()))?;
+        // its text leaves the search index too
+        let key = format!("pdf:tb-{id}");
+        self.engine.store.exec("DELETE FROM fts WHERE key = ?", &[&key]);
+        self.engine.store.exec("DELETE FROM fts_docs WHERE key = ?", &[&key]);
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn textbook_update(&self, id: &str, patch: &Value) {
+        let _ = crate::textbooks::update(id, patch);
+    }
+
+    pub fn textbook_suggestions(&self) -> Vec<Value> {
+        crate::textbooks::suggestions()
     }
 
     // --- files and images ------------------------------------------------------------------------

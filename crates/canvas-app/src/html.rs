@@ -735,6 +735,24 @@ fn para_job(app: &mut App, ui: &Ui, inl: &[Inl], env: &Env, width: f32, base_wei
     let mut overs = Vec::new();
     let nbsp_w = ui.fonts_mut(|f| f.glyph_width(&theme::font(env.size, 400), '\u{a0}'));
     let lh = (env.size * env.lh).round();
+    // A picture or formula is a gap in the text: two no-break spaces (never broken between) with
+    // the gap as the second one's letter spacing, which egui puts *before* a glyph, so it always
+    // lands between them, even when the first starts a line. The thing is drawn from the first.
+    // (Each its own section: append would merge one into the text before it when their formats
+    // match, and the thing would be drawn a gap's width to the right.)
+    let gap = |job: &mut LayoutJob, f: egui::TextFormat, width: f32| {
+        let mut g = f.clone();
+        g.extra_letter_spacing = width - 2.0 * nbsp_w;
+        for fmt in [f, g] {
+            let start = job.text.len();
+            job.text.push('\u{a0}');
+            job.sections.push(egui::text::LayoutSection { leading_space: 0.0, byte_range: egui::text::ByteIndex(start)..egui::text::ByteIndex(job.text.len()), format: fmt });
+        }
+    };
+    // Text's baseline sits this far below a line's top (Inter's ascent), and the rest below.
+    let asc = (env.size * 0.97).round();
+    let below = lh - asc;
+    let mut has_math = false;
     for r in inl {
         match r {
             Inl::Text(text, s) => job.append(text, 0.0, format(env, s, base_weight, doc)),
@@ -742,27 +760,34 @@ fn para_job(app: &mut App, ui: &Ui, inl: &[Inl], env: &Env, width: f32, base_wei
             Inl::Img(im, s) => {
                 let size = inline_img_size(app, ui, im, width);
                 let mut f = format(env, &Sty::default(), base_weight, doc);
-                f.extra_letter_spacing = size.x - nbsp_w;
                 f.line_height = Some(lh.max(size.y + 4.0));
                 f.underline = Stroke::NONE;
                 overs.push((job.sections.len(), Over::Img(im.clone(), size, s.link)));
-                job.append("\u{a0}", 0.0, f);
+                gap(&mut job, f, size.x);
             }
             Inl::Math(tex, _) => {
                 let laid = app.math.lay(ui, tex, env.size * 1.21, env.color);
                 let mut f = format(env, &Sty::default(), base_weight, doc);
-                f.extra_letter_spacing = laid.width - nbsp_w;
-                f.line_height = Some(lh.max(laid.height + laid.depth + 4.0));
-                overs.push((job.sections.len(), Over::Math(laid)));
-                job.append("\u{a0}", 0.0, f);
+                // lines with math are centered on the text, so a tall formula gets room above and
+                // below it (on the text's baseline); this is the line height that makes room
+                let need = (laid.height + 2.0 - asc).max(laid.depth + 2.0 - below).max(0.0);
+                f.line_height = Some(lh + 2.0 * need);
+                f.underline = Stroke::NONE;
+                overs.push((job.sections.len(), Over::Math(laid.clone())));
+                gap(&mut job, f, laid.width);
+                has_math = true;
             }
             Inl::Smiles(smi) => {
                 let mut f = format(env, &Sty::default(), base_weight, doc);
-                f.extra_letter_spacing = 240.0 - nbsp_w;
                 f.line_height = Some(170.0 + 12.0);
                 overs.push((job.sections.len(), Over::Smiles(smi.clone())));
-                job.append("\u{a0}", 0.0, f);
+                gap(&mut job, f, 240.0);
             }
+        }
+    }
+    if has_math {
+        for s in job.sections.iter_mut() {
+            s.format.valign = Align::Center;
         }
     }
     (job, overs)
@@ -828,16 +853,19 @@ fn section_at(g: &Galley, p: Pos2) -> Option<usize> {
     None
 }
 
-/// Where each placeholder glyph (section) landed: (section, left x, row top, row bottom).
-fn placeholder_spots(g: &Galley) -> Vec<(usize, f32, f32, f32)> {
+/// Where each placeholder (its first glyph's section) landed: (section, left x, row top, row
+/// bottom, the text's baseline on that row).
+fn placeholder_spots(g: &Galley) -> Vec<(usize, f32, f32, f32, f32)> {
     let mut out = Vec::new();
     let secs = glyph_sections(g);
     for (ri, row) in g.rows.iter().enumerate() {
         let top = row.pos.y;
         let bottom = row.pos.y + row.row.size.y;
+        // the baseline of the row's text (a placeholder's own may differ: its line is taller)
+        let text_base = row.row.glyphs.iter().find(|gl| gl.chr != '\u{a0}').or(row.row.glyphs.first()).map(|gl| top + gl.pos.y).unwrap_or(bottom);
         for (gi, gl) in row.row.glyphs.iter().enumerate() {
             if gl.chr == '\u{a0}' {
-                out.push((secs[ri][gi], gl.pos.x + row.pos.x, top, bottom));
+                out.push((secs[ri][gi], gl.pos.x + row.pos.x, top, bottom, text_base));
             }
         }
     }
@@ -877,7 +905,7 @@ fn para(app: &mut App, ui: &mut Ui, cx: &mut Ctx, inl: &[Inl], env: &Env, base_w
     // Pictures and formulas in their gaps.
     let spots = placeholder_spots(&galley);
     for (sec, over) in &overs {
-        let Some((_, x, top, bottom)) = spots.iter().find(|s| s.0 == *sec).copied() else { continue };
+        let Some((_, x, top, bottom, base)) = spots.iter().find(|s| s.0 == *sec).copied() else { continue };
         match over {
             Over::Img(im, size, link) => {
                 let r = Rect::from_min_size(galley_origin + vec2(x, bottom - 4.0 - size.y), *size);
@@ -890,8 +918,7 @@ fn para(app: &mut App, ui: &mut Ui, cx: &mut Ctx, inl: &[Inl], env: &Env, base_w
                 }
             }
             Over::Math(laid) => {
-                let baseline = galley_origin.y + bottom - 4.0 - laid.depth;
-                crate::math::paint(ui, laid, pos2(galley_origin.x + x, baseline));
+                crate::math::paint(ui, laid, pos2(galley_origin.x + x, galley_origin.y + base));
             }
             Over::Smiles(smi) => {
                 let r = Rect::from_min_size(galley_origin + vec2(x, top + 6.0), vec2(240.0, 170.0));
@@ -1344,3 +1371,5 @@ mod tests {
         assert_eq!(s.iter().map(|x| x.0).collect::<Vec<_>>(), vec![0, 1, 0, 2, 0, 3]);
     }
 }
+
+

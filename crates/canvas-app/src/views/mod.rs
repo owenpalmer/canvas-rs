@@ -37,6 +37,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: &Route, pane: Pane) -> Result<(), Nee
         View::Syllabus(c) => course::syllabus(app, ui, pane, c),
         View::Home(c) => course::home(app, ui, pane, c),
         View::Recording(c, r) => crate::search::recording_view(app, ui, pane, c, r),
+        View::MathTest => crate::checkpoints::math_test(app, ui, pane),
         View::Welcome => crate::setup::welcome(app, ui, pane),
         View::Settings => crate::settings::view(app, ui, pane),
         View::Notebooks => crate::notebooks::list_view(app, ui, pane),

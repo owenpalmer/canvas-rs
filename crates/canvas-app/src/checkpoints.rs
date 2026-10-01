@@ -1530,6 +1530,34 @@ fn cut_adding(app: &App, key: &str, id: &str) -> bool {
     app.cp.docs.get(key).and_then(|s| s.cuts.iter().find(|c| c.id == id)).map(|c| c.adding_anki).unwrap_or(false)
 }
 
+/// Questions and answers with math, as cards show them (#/mathtest; for checking the layout).
+const MATH_SAMPLES: &[&str] = &[
+    r"Each half keeps the same values of the intensive properties (T, P, ρ) as the original system. It has half the values of the extensive properties (\(\tfrac12 m\), \(\tfrac12 V\)).",
+    r"What is a 'specific property,' and how is specific volume \(v\) defined in terms of extensive volume \(V\) and mass \(m\)?",
+    r"The continuum idealization is valid when the system's characteristic length is much larger than the mean free path of the molecules: \(L \gg \lambda\).",
+    r"For oxygen at 1 atm and 20°C it is about \(6.3 \times 10^{-8}\) m, roughly 200 times the molecule's diameter.",
+    "\\[ \\mathrm{SG} = \\frac{\\rho}{\\rho_{\\mathrm{H_2O}}} \\]\nSpecific gravity is the dimensionless ratio of a substance's density to the density of water at 4°C.\n\nIt equals the density in g/cm³ because water at 4°C has \\(\\rho = 1\\ \\text{g/cm}^3 = 1\\ \\text{kg/L} = 1000\\ \\text{kg/m}^3\\).",
+    r"Its density is \(\rho = \text{SG}\times\rho_{\ce{H2O}} = 13.6 \times 1000 = 13{,}600\ \text{kg/m}^3\), which is 13.6 g/cm³ (this is mercury).",
+    r"Why does \(\frac{dP}{dz} = -\rho g\) imply that pressure grows with depth, and what is \(\int_0^h \rho g\,dz\) for constant \(\rho\)?",
+    r"The Reynolds number \(\mathrm{Re} = \frac{\rho V D}{\mu}\) compares inertial to viscous forces; flow in a pipe is laminar when \(\mathrm{Re} \lesssim 2300\) and \(\sqrt{\frac{\tau_w}{\rho}}\) is the friction velocity.",
+    r"Bernoulli: \(P_1 + \tfrac{1}{2}\rho V_1^2 + \rho g z_1 = P_2 + \tfrac{1}{2}\rho V_2^2 + \rho g z_2\) along a streamline.",
+];
+
+pub fn math_test(app: &mut App, ui: &mut Ui, pane: Pane) -> Result<(), crate::data::Need> {
+    crate::views::head(app, ui, pane, "Math test", vec![], None);
+    for (i, s) in MATH_SAMPLES.iter().enumerate() {
+        let width = if i % 2 == 0 { 420.0 } else { 560.0 };
+        ui.allocate_ui(vec2(width, 0.0), |ui| {
+            ui.set_max_width(width);
+            let r = ui.max_rect();
+            crate::html::bare(app, ui, &rich_html(s), Flavor::Canvas, Env { weight: 500, ..Env::content(pane) });
+            ui.painter().rect_stroke(r.with_max_y(ui.min_rect().max.y), 0.0, egui::Stroke::new(0.5, t().faint), egui::StrokeKind::Outside);
+        });
+        ui.add_space(14.0);
+    }
+    Ok(())
+}
+
 fn rich_html(text: &str) -> String {
     // text with \( \) math and \smiles{}; html.rs splits those out
     format!("<p>{}</p>", esc(text).replace('\n', "<br>"))

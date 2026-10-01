@@ -69,6 +69,18 @@ fn metrics(font: &'static str, c: char) -> (f32, f32, f32, &'static str) {
     (if wide { 0.8 } else { 0.55 }, 0.7, 0.05, font)
 }
 
+/// An italic glyph's overhang past its advance, in ems (KaTeX's italic correction).
+fn italic(font: &'static str, c: char) -> f32 {
+    if !font.contains("Italic") {
+        return 0.0;
+    }
+    let Some(face) = FACES.get(font) else { return 0.0 };
+    let Some(g) = face.glyph_index(c) else { return 0.0 };
+    let upem = face.units_per_em() as f32;
+    let adv = face.glyph_hor_advance(g).unwrap_or(0) as f32 / upem;
+    face.glyph_bounding_box(g).map(|b| (b.x_max as f32 / upem - adv).max(0.0)).unwrap_or(0.0)
+}
+
 // ---------- the laid-out result ----------
 #[derive(Clone, Debug)]
 enum Item {
@@ -103,6 +115,9 @@ struct Bx {
     h: f32,
     d: f32,
     items: Vec<Item>,
+    /// the last glyph's italic correction (included in w): how far an italic letter leans past
+    /// its advance. A subscript tucks back under it; a superscript goes after it.
+    ic: f32,
 }
 
 impl Bx {
@@ -1339,7 +1354,7 @@ fn glyphs(s: &str, font: Fnt, cx: &Cx) -> Bx {
     let mut x = 0.0;
     for ch in s.chars() {
         let (adv, h, d, f) = metrics(font.name(), ch);
-        if f != run_font && !run.is_empty() {
+        if (f != run_font || b.ic > 0.0) && !run.is_empty() {
             b.items.push(Item::Glyph { x: run_x, y: 0.0, s: std::mem::take(&mut run), font: run_font, size: em, color: cx.color });
         }
         if run.is_empty() {
@@ -1347,7 +1362,9 @@ fn glyphs(s: &str, font: Fnt, cx: &Cx) -> Bx {
             run_x = x;
         }
         run.push(ch);
-        x += adv * em;
+        // an italic letter is followed by its overhang (KaTeX's margin-right: italic)
+        b.ic = italic(f, ch) * em;
+        x += adv * em + b.ic;
         b.h = b.h.max(h * em);
         b.d = b.d.max(d * em);
     }
@@ -1430,13 +1447,13 @@ fn node(n: &Node, cx: &Cx) -> Bx {
         Node::Color(c, v) => hlist(v, &Cx { color: *c, ..*cx }),
         Node::Phantom(v) => {
             let b = hlist(v, cx);
-            Bx { w: b.w, h: b.h, d: b.d, items: vec![] }
+            Bx { w: b.w, h: b.h, d: b.d, items: vec![], ic: 0.0 }
         }
         Node::Boxed(v) => {
             let b = hlist(v, cx);
             let pad = 0.3 * em;
             let t = (RULE * em).max(1.0);
-            let mut out = Bx { w: b.w + 2.0 * pad, h: b.h + pad, d: b.d + pad, items: vec![] };
+            let mut out = Bx { w: b.w + 2.0 * pad, h: b.h + pad, d: b.d + pad, items: vec![], ic: 0.0 };
             let (w, h, d) = (out.w, out.h, out.d);
             out.add(b, pad, 0.0);
             out.items.push(Item::Path { pts: vec![(0.0, -h), (w, -h), (w, d), (0.0, d), (0.0, -h)], width: t, color: cx.color });
@@ -1456,7 +1473,7 @@ fn node(n: &Node, cx: &Cx) -> Bx {
         Node::Line { body, over } => {
             let b = hlist(body, cx);
             let t = RULE * em;
-            let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![] };
+            let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![], ic: 0.0 };
             if *over {
                 let y = -(b.h + 3.0 * t);
                 out.h = b.h + 4.0 * t;
@@ -1474,7 +1491,7 @@ fn node(n: &Node, cx: &Cx) -> Bx {
             let need = 2.0 * (b.h - AXIS * em).max(b.d + AXIS * em);
             let lb = delimiter(l, need, cx);
             let rb = delimiter(r, need, cx);
-            let mut out = Bx { w: lb.w + b.w + rb.w, h: b.h.max(lb.h).max(rb.h), d: b.d.max(lb.d).max(rb.d), items: vec![] };
+            let mut out = Bx { w: lb.w + b.w + rb.w, h: b.h.max(lb.h).max(rb.h), d: b.d.max(lb.d).max(rb.d), items: vec![], ic: 0.0 };
             let (lw, bw) = (lb.w, b.w);
             out.add(lb, 0.0, 0.0);
             out.add(b, lw, 0.0);
@@ -1516,7 +1533,7 @@ fn stretch_arrow(ch: char, w: f32, cx: &Cx) -> Bx {
     let y = -AXIS * em;
     let t = (0.045 * em).max(1.0);
     let head = 0.28 * em;
-    let mut b = Bx { w, h: 0.5 * em, d: 0.0, items: vec![] };
+    let mut b = Bx { w, h: 0.5 * em, d: 0.0, items: vec![], ic: 0.0 };
     let col = cx.color;
     let right = |b: &mut Bx, y: f32, harpoon: bool| {
         b.items.push(Item::Path { pts: vec![(0.0, y), (w - t, y)], width: t, color: col });
@@ -1564,7 +1581,7 @@ fn stretch_arrow(ch: char, w: f32, cx: &Cx) -> Bx {
 /// A base with things centered above and below it.
 fn stack(b: Bx, over: Option<Bx>, under: Option<Bx>, gap: f32, _cx: &Cx) -> Bx {
     let w = b.w.max(over.as_ref().map(|o| o.w).unwrap_or(0.0)).max(under.as_ref().map(|u| u.w).unwrap_or(0.0));
-    let mut out = Bx { w, h: b.h, d: b.d, items: vec![] };
+    let mut out = Bx { w, h: b.h, d: b.d, items: vec![], ic: 0.0 };
     let (bh, bd, bw) = (b.h, b.d, b.w);
     out.add(b, (w - bw) / 2.0, 0.0);
     if let Some(o) = over {
@@ -1616,7 +1633,7 @@ fn scripts(base: &Node, sup: Option<&Node>, sub: Option<&Node>, cx: &Cx) -> Bx {
         if lim {
             let (bh, bd, bw) = (b.h, b.d, b.w);
             let w = bw.max(sup_b.as_ref().map(|x| x.w).unwrap_or(0.0)).max(sub_b.as_ref().map(|x| x.w).unwrap_or(0.0));
-            let mut out = Bx { w, h: bh, d: bd, items: vec![] };
+            let mut out = Bx { w, h: bh, d: bd, items: vec![], ic: 0.0 };
             out.add(b, (w - bw) / 2.0, 0.0);
             if let Some(s) = sup_b {
                 let gap = (0.111 * em).max(0.2 * em - s.d);
@@ -1648,10 +1665,10 @@ fn attach(b: Bx, simple: bool, sup: Option<Bx>, sub: Option<Bx>, cx: &Cx, integr
         Style::D => 0.413,
         _ => 0.363,
     } * em;
-    let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![] };
+    let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![], ic: if sup.is_none() && sub.is_none() { b.ic } else { 0.0 } };
     let bw = b.w;
+    let kern = if integral { -0.2 * em } else { -b.ic };
     out.add(b, 0.0, 0.0);
-    let kern = if integral { -0.2 * em } else { 0.0 };
     match (sup, sub) {
         (Some(s), None) => {
             sup_shift = sup_shift.max(min_sup).max(s.d + 0.25 * XHEIGHT * em);
@@ -1719,7 +1736,7 @@ fn frac(num: &[Node], den: &[Node], style: Option<Style>, bar: bool, delims: Opt
     }
     let pad = 0.12 * em;
     let w = nb.w.max(db.w) + 2.0 * pad;
-    let mut out = Bx { w, h: num_shift + nb.h, d: den_shift + db.d, items: vec![] };
+    let mut out = Bx { w, h: num_shift + nb.h, d: den_shift + db.d, items: vec![], ic: 0.0 };
     let (nw, dw) = (nb.w, db.w);
     out.add(nb, (w - nw) / 2.0, -num_shift);
     out.add(db, (w - dw) / 2.0, den_shift);
@@ -1730,7 +1747,7 @@ fn frac(num: &[Node], den: &[Node], style: Option<Style>, bar: bool, delims: Opt
         let need = 2.0 * (out.h - axis).max(out.d + axis);
         let lb = delimiter(l, need, &cx);
         let rb = delimiter(r, need, &cx);
-        let mut o2 = Bx { w: lb.w + out.w + rb.w, h: out.h.max(lb.h), d: out.d.max(lb.d), items: vec![] };
+        let mut o2 = Bx { w: lb.w + out.w + rb.w, h: out.h.max(lb.h), d: out.d.max(lb.d), items: vec![], ic: 0.0 };
         let (lw, ow) = (lb.w, out.w);
         o2.add(lb, 0.0, 0.0);
         o2.add(out, lw, 0.0);
@@ -1750,7 +1767,7 @@ fn sqrt(body: &[Node], index: Option<&[Node]>, cx: &Cx) -> Bx {
     let bottom = b.d.max(0.2 * em) + 0.05 * em;
     let hh = bottom - top;
     let sw = (0.55 * em).max(0.25 * hh).min(0.9 * em);
-    let mut out = Bx { w: 0.0, h: -top + t, d: bottom, items: vec![] };
+    let mut out = Bx { w: 0.0, h: -top + t, d: bottom, items: vec![], ic: 0.0 };
     let mut x0 = 0.0;
     if let Some(ix) = index {
         let ib = hlist(ix, &cx.with(Style::SS));
@@ -1778,7 +1795,7 @@ fn accent(body: &[Node], acc: char, cx: &Cx) -> Bx {
     let em = cx.em();
     let b = hlist(body, cx);
     let single = body.len() == 1 && is_char(&body[0]);
-    let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![] };
+    let mut out = Bx { w: b.w, h: b.h, d: b.d, items: vec![], ic: 0.0 };
     let (bw, bh) = (b.w, b.h);
     out.add(b, 0.0, 0.0);
     if acc == '→' || acc == '←' || (!single && matches!(acc, 'ˆ' | '˜')) {
@@ -1882,7 +1899,7 @@ fn array(rows: &[Vec<Vec<Node>>], align: &[char], l: &str, r: &str, style: Style
     let width = x;
     let axis = AXIS * cx.em();
     let top = -(total / 2.0 + axis);
-    let mut body = Bx { w: width, h: total / 2.0 + axis, d: total / 2.0 - axis, items: vec![] };
+    let mut body = Bx { w: width, h: total / 2.0 + axis, d: total / 2.0 - axis, items: vec![], ic: 0.0 };
     let mut y = top;
     for (i, row) in cells.into_iter().enumerate() {
         let (h, d) = row_hd[i];
@@ -1906,7 +1923,7 @@ fn array(rows: &[Vec<Vec<Node>>], align: &[char], l: &str, r: &str, style: Style
     let pad = 0.2 * em;
     let lb = delimiter(l, need, cx);
     let rb = delimiter(r, need, cx);
-    let mut out = Bx { w: lb.w + pad + body.w + pad + rb.w, h: body.h.max(lb.h), d: body.d.max(lb.d), items: vec![] };
+    let mut out = Bx { w: lb.w + pad + body.w + pad + rb.w, h: body.h.max(lb.h), d: body.d.max(lb.d), items: vec![], ic: 0.0 };
     let (lw, bw) = (lb.w, body.w);
     out.add(lb, 0.0, 0.0);
     out.add(body, lw + pad, 0.0);
@@ -1950,5 +1967,19 @@ mod tests {
         let l = lay(r"\ce{C9H8O4}");
         assert_eq!(texts(&l), "C9H8O4");
         assert!(l.depth > 2.0);
+    }
+
+    #[test]
+    fn italic_correction() {
+        // an italic V leans past its advance: room after it, a superscript after that, and a
+        // subscript tucked back under it
+        let v = lay("V");
+        let (adv, ..) = metrics("KaTeX_Math-Italic", 'V');
+        assert!(v.width > adv * 20.0 + 1.0, "{} vs {}", v.width, adv * 20.0);
+        let x_of = |l: &Laid, s: &str| l.items.iter().find_map(|i| if let Item::Glyph { x, s: t, .. } = i { (t == s).then_some(*x) } else { None }).unwrap();
+        let both = lay("V_1^2");
+        assert!(x_of(&both, "2") > x_of(&both, "1") + 1.0);
+        // upright text has none
+        assert_eq!(lay(r"\mathrm{V}").width, metrics("KaTeX_Main-Regular", 'V').0 * 20.0);
     }
 }

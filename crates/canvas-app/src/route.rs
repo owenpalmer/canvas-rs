@@ -39,6 +39,8 @@ pub enum View {
     Textbooks,
     /// a textbook (its id in the library)
     Textbook(String),
+    /// checkpoint-card text with math, for checking the layout (not linked anywhere)
+    MathTest,
     NotFound,
 }
 
@@ -97,6 +99,7 @@ static ROUTES: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (r"^/anki/deck/(\d+)$", "ankideck"),
         (r"^/textbooks$", "textbooks"),
         (r"^/t/(\w+)$", "textbook"),
+        (r"^/mathtest$", "mathtest"),
     ]
     .into_iter()
     .map(|(p, n)| (Regex::new(p).unwrap(), n))
@@ -147,6 +150,7 @@ pub fn parse(hash: &str) -> Route {
                 "ankideck" => View::AnkiDeck(g(1).parse().unwrap_or(0)),
                 "textbooks" => View::Textbooks,
                 "textbook" => View::Textbook(g(1)),
+                "mathtest" => View::MathTest,
                 _ => View::NotFound,
             };
             break;

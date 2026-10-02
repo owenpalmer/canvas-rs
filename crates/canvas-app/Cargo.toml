@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 base64 = "0.23.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-canvas-mcp = { version = "0.3.0", path = "../canvas-mcp" }
+canvas-mcp = { version = "0.3.1", path = "../canvas-mcp" }
 chrono = "0.4.45"
 eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
 egui = "0.36.2"
